@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment and secrets — never commit real keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local data (uploads, generated exports, local DB volumes)
+data/
+storage/
+uploads/
+
+# Generated sample documents (regenerate with: npm run fixtures)
+fixtures/*.docx
+fixtures/*.pdf
+fixtures/*.txt
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test and tooling caches
+coverage/
+.vitest/
+.nyc_output/
+.cache/
+
+# Editor and OS noise
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Scratch / probe files used during development
+probe*.ts
+probe*.log

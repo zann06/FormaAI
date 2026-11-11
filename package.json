@@ -1,0 +1,31 @@
+{
+  "name": "formaai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FormaAI — open-source, BYOK, template-driven AI report generation platform",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @formaai/shared && npm run build --workspace @formaai/docx-engine && npm run build --workspace @formaai/ai-providers && npm run build --workspace @formaai/api && npm run build --workspace @formaai/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspace @formaai/api && npm run test --workspace @formaai/docx-engine && npm run test --workspace @formaai/ai-providers && npm run test --workspace @formaai/shared && npm run test --workspace @formaai/web",
+    "dev": "npm run dev --workspace @formaai/api & npm run dev --workspace @formaai/web",
+    "db:generate": "npm run db:generate --workspace @formaai/api",
+    "db:migrate": "npm run db:migrate --workspace @formaai/api",
+    "check:tenancy": "node scripts/check-tenancy.mjs",
+    "fixtures": "node fixtures/generate-fixtures.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

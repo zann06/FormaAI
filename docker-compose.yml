@@ -1,0 +1,76 @@
+# FormaAI — self-hosted stack: PostgreSQL + API (with LibreOffice) + web (nginx).
+#
+# Quick start:
+#   1. cp .env.example .env
+#   2. Generate secrets and paste them into .env:
+#        SESSION_SECRET          -> openssl rand -hex 32
+#        CREDENTIAL_ENCRYPTION_KEY -> openssl rand -base64 32
+#   3. docker compose up -d --build
+#   4. Open http://localhost:8080
+#
+# There is no platform-wide AI key: every user adds their own provider key in the UI.
+
+name: formaai
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-formaai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-formaai}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-formaai} -d ${POSTGRES_DB:-formaai}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published to the host by default; the API reaches it over the compose network.
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-formaai}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-formaai}
+      API_HOST: 0.0.0.0
+      API_PORT: '8787'
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY in .env}
+      # Requests arrive via nginx over plain HTTP inside the network; the browser
+      # terminates TLS at your reverse proxy, so cookies are marked Secure via
+      # COOKIE_SECURE when you publish over HTTPS.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      ENABLE_DEV_PROVIDER: ${ENABLE_DEV_PROVIDER:-false}
+      STORAGE_DRIVER: local
+      STORAGE_DIR: /app/data/storage
+      LIBREOFFICE_BIN: soffice
+      MAX_FILE_MB: ${MAX_FILE_MB:-25}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - apidata:/app/data
+    expose:
+      - '8787'
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${WEB_PORT:-8080}:80'
+
+volumes:
+  pgdata:
+  apidata:

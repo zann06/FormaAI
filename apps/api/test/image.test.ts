@@ -79,6 +79,26 @@ describe('image extraction', () => {
   });
 
   /**
+   * OCR *ran* but found nothing. This is the normal outcome for screenshots of
+   * diagrams and topologies, whose labels are short and scattered. The message
+   * must tell the user to write that content themselves rather than leaving them
+   * guessing — and it must not claim OCR was unavailable.
+   */
+  it('explains that diagrams and photos cannot be read, and points to manual writing', async () => {
+    // A stub OCR that behaves like Tesseract on a topology diagram: it runs
+    // successfully but yields no usable text.
+    const result = await extractImage(PNG_1X1, 'png', {
+      ocrEnabled: true,
+      ocr: async () => '   \n  ',
+    });
+    expect(result.units).toHaveLength(0);
+    expect(result.needsOcr).toBe(false); // OCR was available; it simply found no text
+    const message = result.warnings.join(' ');
+    expect(message).toMatch(/diagram/i);
+    expect(message).toMatch(/describe it yourself/i);
+  });
+
+  /**
    * Exercises the real OCR adapter end-to-end. Tesseract is present in the
    * Docker image; on a host without it this is skipped rather than faked.
    */

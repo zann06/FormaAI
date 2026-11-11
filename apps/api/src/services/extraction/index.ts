@@ -256,7 +256,16 @@ export function extractTxt(bytes: Uint8Array, maxChars = 2_000_000): ExtractionR
 export async function extractImage(
   bytes: Uint8Array,
   format: 'png' | 'jpeg',
-  options: { ocrEnabled: boolean; nameHint?: string; maxChars?: number },
+  options: {
+    ocrEnabled: boolean;
+    nameHint?: string;
+    maxChars?: number;
+    /**
+     * Injectable OCR function. Defaults to the real adapter; tests supply a stub
+     * so the empty-result branch can be exercised without a Tesseract binary.
+     */
+    ocr?: (image: Uint8Array, nameHint: string, format: 'png' | 'jpeg') => Promise<string | null>;
+  },
 ): Promise<ExtractionResult> {
   const maxChars = options.maxChars ?? 2_000_000;
   if (!options.ocrEnabled) {
@@ -272,8 +281,9 @@ export async function extractImage(
     };
   }
 
-  const { runOcr } = await import('./ocr.js');
-  const raw = await runOcr(bytes, options.nameHint ?? 'image', format);
+  const runOcrFn =
+    options.ocr ?? ((await import('./ocr.js')).runOcr as NonNullable<typeof options.ocr>);
+  const raw = await runOcrFn(bytes, options.nameHint ?? 'image', format);
   const text = (raw ?? '').replace(/\r\n/g, '\n').trim();
 
   if (text.length === 0) {
@@ -282,8 +292,10 @@ export async function extractImage(
       pageCount: 1,
       method: 'ocr-http',
       warnings: [
-        'OCR ran on this image but found no readable text. It may be a photograph, ' +
-          'a chart without labels, or too low-resolution to read.',
+        'OCR found no readable flowing text in this image. Screenshots of diagrams, ' +
+          'network topologies, charts and photos usually cannot be read this way, because ' +
+          'their labels are short and scattered rather than written as text. If this image ' +
+          'shows a diagram, describe it yourself in the section editor instead.',
       ],
       needsOcr: false,
     };

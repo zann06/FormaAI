@@ -60,8 +60,21 @@ export async function registerPlugins(instance: FastifyInstance, options: Server
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       const origin = request.headers.origin;
       if (origin && !config.webOrigins.includes(origin)) {
+        // Operator-facing hint: this is almost always a WEB_ORIGIN mismatch (e.g.
+        // the app is reached on a different port than WEB_ORIGIN advertises), not
+        // an attack. Naming the expected origin makes that immediately fixable.
+        request.log.warn(
+          { origin, allowed: config.webOrigins },
+          'blocked a state-changing request from an origin not in WEB_ORIGIN',
+        );
         return reply.status(403).send({
-          error: { code: 'FORBIDDEN', message: 'Cross-origin request blocked' },
+          error: {
+            code: 'FORBIDDEN',
+            message:
+              `Cross-origin request blocked: this app is reached from ${origin}, ` +
+              `but the server's WEB_ORIGIN is set to ${config.webOrigins.join(', ')}. ` +
+              `Set WEB_ORIGIN to the URL you use in the browser and restart the API.`,
+          },
         });
       }
     }

@@ -39,6 +39,11 @@ docker compose ps        # wait for (healthy)
 
 Open <http://localhost:8080>, create an account, and go to **Providers**.
 
+> **It is meant to be yours alone.** Run one instance per person. Because the
+> person who runs the server can read its database, do not share one instance
+> with people whose data you should not be able to read. See
+> [Trust model: one instance per person](../README.md#trust-model-one-instance-per-person).
+
 ### Add your AI provider
 
 1. **Providers → Add provider.**
@@ -126,9 +131,15 @@ including a local model via Ollama or vLLM — set the Base URL to your local
 server.
 
 **Can several people use one instance?**
-Yes. Accounts are fully isolated: every query is scoped to the signed-in user,
-and another user's project returns 404, not a permission error. Each user brings
-their own key.
+Technically yes. Accounts are isolated: every query is scoped to the signed-in
+user, and another user's project returns `404`, not a permission error. Each user
+brings their own key.
+
+But the **recommended model is one instance per person**, not one shared
+instance. The operator of a server has the database and the encryption key, so
+they can read everything on it. Only share an instance with people whose data you
+are entitled to see. Need real separation? Deploy separate instances — see
+[Trust model](../README.md#trust-model-one-instance-per-person).
 
 **Can I turn off public sign-up?**
 Yes: `REGISTRATION_ENABLED=false`. Create accounts while it is open, then close it.

@@ -4,8 +4,12 @@
 documents, and get a finished, editable report that keeps your template's exact
 structure and formatting — exported as DOCX or PDF.
 
-Open source, self-hostable, multi-user, and **bring-your-own-key**: users supply
-their own AI provider credentials. There is no platform-wide API key.
+Open source, self-hostable and **bring-your-own-key**: you supply your own AI
+provider credentials. There is no platform-wide API key, no central server and no
+telemetry. The intended deployment is **one instance per person** — you keep your
+own database, your own encryption key and your own files (see
+[Trust model](#trust-model-one-instance-per-person)). Multiple accounts within one
+instance are still isolated from each other.
 
 [![CI](https://github.com/your-org/formaai/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/formaai/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE.txt)
@@ -45,6 +49,60 @@ These are enforced in code and covered by tests, not just aspirations:
 - **Honest failure.** Missing PDF converter, bad provider key or unreachable
   provider produce a specific, documented error — never a fake file or silent
   fallback to someone else's key.
+
+---
+
+## Trust model: one instance per person
+
+The intended deployment is **one instance per person (or per organisation)**,
+running on your own machine or your own server. That is what makes the privacy
+story simple: *you* hold the database, the encryption key and the files, and
+nobody else does.
+
+```
+                       not provided by this project
+                    ┌──────────────────────────────┐
+                    │  no central server           │
+                    │  no shared database          │
+                    │  no platform AI key          │
+                    │  no telemetry                │
+                    └──────────────────────────────┘
+
+  Alice                        Bob                         Carol
+  ┌──────────────┐             ┌──────────────┐            ┌──────────────┐
+  │ her instance │             │ his instance │            │ her instance │
+  │ her database │             │ his database │            │ her database │
+  │ her keys     │             │ his keys     │            │ her keys     │
+  └──────────────┘             └──────────────┘            └──────────────┘
+```
+
+There is no "someone else's database" to leak into, because each deployment is
+independent. If you self-host for yourself, you are the only operator.
+
+**Within** a single instance, multiple accounts are fully isolated from each
+other: every query is scoped to the authenticated `user_id`, a foreign resource
+returns `404`, and provider keys are encrypted with AAD bound to
+`userId|credentialId` so ciphertext cannot be transplanted between accounts.
+
+### What this protects against — and what it does not
+
+Be clear about the boundary:
+
+| Threat | Protected? |
+| --- | --- |
+| User A reading user B's projects on the same instance | **Yes** — scoped queries, 404 on foreign IDs, verified by `apps/api/test/security.test.ts` |
+| User A using user B's provider key | **Yes** — write-only, never returned, AAD-bound ciphertext |
+| A stolen database dump alone | **Yes** — keys stay encrypted without `CREDENTIAL_ENCRYPTION_KEY` |
+| The **operator** of an instance reading that instance's data | **No** — whoever runs the server holds the database and the encryption key |
+| A compromised host (root on the server) | **No** — same reasoning; protect the host, encrypt your backups |
+
+That last row is the honest limit of any self-hosted, server-side-encrypted
+application. It is also why the recommended model is *one instance per person*:
+it keeps the number of people who can read your data at one.
+
+If you need physical isolation between tenants, deploy **separate instances**
+(one Compose stack and one database per tenant). Do not try to get that from
+account separation inside a single instance.
 
 ---
 

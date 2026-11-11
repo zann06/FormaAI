@@ -47,7 +47,9 @@ services:
       # Requests arrive via nginx over plain HTTP inside the network; the browser
       # terminates TLS at your reverse proxy, so cookies are marked Secure via
       # COOKIE_SECURE when you publish over HTTPS.
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      # Must match the origin the browser actually uses. Derive it from WEB_PORT so
+      # changing the published port cannot silently break CSRF origin checks.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:${WEB_PORT:-8080}}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
       ENABLE_DEV_PROVIDER: ${ENABLE_DEV_PROVIDER:-false}

@@ -136,6 +136,14 @@ server {
 Never commit `.env`. It is already in `.gitignore`; the CI pipeline also runs
 `gitleaks` to catch accidental secrets.
 
+> **The operator can read this instance's data.** Holding
+> `CREDENTIAL_ENCRYPTION_KEY` *and* database access means you can decrypt every
+> key on your instance. Encryption at rest defends against a stolen database
+> dump or a leaked backup, not against the administrator. Design your deployment
+> accordingly: **one instance per person or organisation**, and only give shell
+> and `.env` access to people who are meant to see the data. See
+> [Trust model](../README.md#trust-model-one-instance-per-person).
+
 ### Rotating the credential-encryption key
 
 Rotation re-encrypts every stored API key inside a single transaction, so a crash

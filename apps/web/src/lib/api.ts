@@ -49,12 +49,16 @@ async function handle<T>(response: Response): Promise<T> {
 }
 
 function jsonInit(method: string, body?: unknown): RequestInit {
-  return {
-    method,
-    headers: { 'content-type': 'application/json' },
-    credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
-  };
+  const init: RequestInit = { method, credentials: 'same-origin' };
+  // Only declare a JSON content type when there is actually a JSON body. Sending
+  // `content-type: application/json` with an empty body makes Fastify reject the
+  // request ("Body cannot be empty when content-type is set to
+  // 'application/json'"), which broke every bodyless POST/DELETE.
+  if (body !== undefined) {
+    init.headers = { 'content-type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  return init;
 }
 
 export const api = {

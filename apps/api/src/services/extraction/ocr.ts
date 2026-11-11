@@ -19,21 +19,38 @@ export function isOcrConfigured(): boolean {
   return Boolean(process.env.TESSERACT_BIN || process.env.OCR_ENDPOINT);
 }
 
-export async function runOcr(image: Uint8Array, nameHint = 'image'): Promise<string | null> {
+/**
+ * The image format the OCR backends receive. Tesseract infers the format from
+ * the file, but the HTTP backend needs an explicit content type, so callers must
+ * tell us what they are handing over.
+ */
+export type OcrImageFormat = 'png' | 'jpeg';
+
+export async function runOcr(
+  image: Uint8Array,
+  nameHint = 'image',
+  format: OcrImageFormat = 'png',
+): Promise<string | null> {
   const tesseractBin = process.env.TESSERACT_BIN;
   const endpoint = process.env.OCR_ENDPOINT;
-  if (tesseractBin) return runTesseract(tesseractBin, image, nameHint);
-  if (endpoint) return runHttpOcr(endpoint, image, nameHint);
+  if (tesseractBin) return runTesseract(tesseractBin, image, nameHint, format);
+  if (endpoint) return runHttpOcr(endpoint, image, nameHint, format);
   return null;
 }
 
-async function runTesseract(bin: string, image: Uint8Array, nameHint: string): Promise<string | null> {
+async function runTesseract(
+  bin: string,
+  image: Uint8Array,
+  nameHint: string,
+  format: OcrImageFormat,
+): Promise<string | null> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'formaai-ocr-'));
-  const file = path.join(dir, `${nameHint.replace(/[^a-z0-9-]/gi, '_')}.png`);
+  const extension = format === 'jpeg' ? 'jpg' : 'png';
+  const file = path.join(dir, `${nameHint.replace(/[^a-z0-9-]/gi, '_')}.${extension}`);
   try {
     await fs.writeFile(file, image);
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(bin, [file, 'stdout', '-l', process.env.OCR_LANG ?? 'eng'], {
+      const child = spawn(bin, [file, 'stdout', '-l', process.env.OCR_LANG ?? 'eng+ind'], {
         timeout: 60_000,
         windowsHide: true,
       });
@@ -53,8 +70,16 @@ async function runTesseract(bin: string, image: Uint8Array, nameHint: string): P
   }
 }
 
-async function runHttpOcr(endpoint: string, image: Uint8Array, nameHint: string): Promise<string | null> {
-  const headers: Record<string, string> = { 'content-type': 'image/png', 'x-image-name': nameHint };
+async function runHttpOcr(
+  endpoint: string,
+  image: Uint8Array,
+  nameHint: string,
+  format: OcrImageFormat,
+): Promise<string | null> {
+  const headers: Record<string, string> = {
+    'content-type': format === 'jpeg' ? 'image/jpeg' : 'image/png',
+    'x-image-name': nameHint,
+  };
   if (process.env.OCR_TOKEN) headers.authorization = `Bearer ${process.env.OCR_TOKEN}`;
   const response = await fetch(endpoint, {
     method: 'POST',

@@ -30,6 +30,8 @@ export interface ValidatedUpload {
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // %PDF
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
 const ZIP_MAGIC_EMPTY = [0x50, 0x4b, 0x05, 0x06];
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]; // \x89PNG\r\n\x1a\n
+const JPEG_MAGIC = [0xff, 0xd8, 0xff]; // SOI + first marker
 
 function startsWith(bytes: Uint8Array, magic: number[]): boolean {
   if (bytes.length < magic.length) return false;
@@ -99,6 +101,14 @@ export function validateUpload(
     if (!looksLikeText(bytes)) {
       throw validationError('The .txt file contains binary data (rename it to the correct format)');
     }
+  } else if (extension === '.png') {
+    if (!startsWith(bytes, PNG_MAGIC)) {
+      throw validationError('This file is not a valid PNG (signature mismatch); it may have been renamed');
+    }
+  } else if (extension === '.jpg' || extension === '.jpeg') {
+    if (!startsWith(bytes, JPEG_MAGIC)) {
+      throw validationError('This file is not a valid JPEG (signature mismatch); it may have been renamed');
+    }
   }
 
   const mimeType =
@@ -106,7 +116,11 @@ export function validateUpload(
       ? 'application/pdf'
       : extension === '.docx'
         ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : 'text/plain';
+        : extension === '.png'
+          ? 'image/png'
+          : extension === '.jpg' || extension === '.jpeg'
+            ? 'image/jpeg'
+            : 'text/plain';
 
   return { extension, mimeType, sizeBytes: bytes.byteLength, bytes };
 }

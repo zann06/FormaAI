@@ -10,9 +10,16 @@ export const MAX_PROJECTS_PER_USER = 100;
 /** Maximum total storage per user (bytes). Overridable via USER_STORAGE_QUOTA_MB. */
 export const DEFAULT_USER_STORAGE_QUOTA_MB = 1024;
 
-export const SOURCE_EXTENSIONS = ['.pdf', '.docx', '.txt'] as const;
+export const SOURCE_EXTENSIONS = ['.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg'] as const;
 export const TEMPLATE_EXTENSIONS = ['.docx'] as const;
-export const EXTENSIBLE_SOURCE_EXTENSIONS = ['.xlsx', '.csv', '.pptx', '.png', '.jpg', '.jpeg'] as const;
+export const EXTENSIBLE_SOURCE_EXTENSIONS = ['.xlsx', '.csv', '.pptx'] as const;
+
+/** Source formats that carry no text of their own and therefore require OCR. */
+export const IMAGE_SOURCE_EXTENSIONS = ['.png', '.jpg', '.jpeg'] as const;
+
+export function isImageSourceExtension(extension: string): boolean {
+  return (IMAGE_SOURCE_EXTENSIONS as readonly string[]).includes(extension.toLowerCase());
+}
 
 export const MIME_BY_EXTENSION: Record<string, string[]> = {
   '.pdf': ['application/pdf'],
@@ -23,6 +30,9 @@ export const MIME_BY_EXTENSION: Record<string, string[]> = {
   ],
   '.txt': ['text/plain', 'application/octet-stream', 'text/markdown'],
   '.csv': ['text/csv', 'text/plain', 'application/vnd.ms-excel'],
+  '.png': ['image/png', 'application/octet-stream'],
+  '.jpg': ['image/jpeg', 'image/jpg', 'application/octet-stream'],
+  '.jpeg': ['image/jpeg', 'image/jpg', 'application/octet-stream'],
 };
 
 export const PROJECT_STATUSES = ['draft', 'processing', 'needs_review', 'ready', 'failed', 'archived'] as const;

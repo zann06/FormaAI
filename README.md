@@ -244,8 +244,14 @@ Documented deliberately rather than discovered later:
 - New **table rows** are not generated; tables are filled via `{{placeholders}}`.
 - **Footnotes, tracked changes, SmartArt** and content-control structure are not
   edited (placeholder text inside content controls is replaced).
-- **XLSX / CSV / PPTX / images** are not extracted in this version.
-- **OCR** requires an external engine (`TESSERACT_BIN` or `OCR_ENDPOINT`).
+- **XLSX / CSV / PPTX** are not extracted in this version.
+- **Image sources** (`.png`, `.jpg`, `.jpeg`) are read with OCR only — the model
+  never sees the picture, so nothing is inferred from a chart or photo that OCR
+  could not put into words. OCR text can be inexact; the UI says so on the
+  document. Without OCR configured, an image is rejected with
+  `OCR_NOT_CONFIGURED` rather than indexed as empty. The Docker image bundles
+  Tesseract (English + Indonesian); on other setups set `TESSERACT_BIN` or
+  `OCR_ENDPOINT`.
 - **PDF export** needs LibreOffice or a converter; without it, PDF export is refused
   with `PDF_CONVERTER_NOT_CONFIGURED` while DOCX continues to work.
 - No multi-factor authentication.

@@ -30,18 +30,26 @@ WORKDIR /app
 
 # LibreOffice (headless) converts the final DOCX to PDF. Without it the API still
 # runs and DOCX export works; PDF export returns PDF_CONVERTER_NOT_CONFIGURED.
+# Tesseract OCR reads images (.png/.jpg/.jpeg) and scanned PDF pages. Without it
+# those sources are rejected with OCR_NOT_CONFIGURED instead of producing empty
+# text. `-ind` adds Indonesian alongside the default English model.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libreoffice-writer \
       fonts-dejavu-core \
       fonts-liberation \
+      tesseract-ocr \
+      tesseract-ocr-eng \
+      tesseract-ocr-ind \
       tini \
  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     API_HOST=0.0.0.0 \
     API_PORT=8787 \
-    LIBREOFFICE_BIN=soffice
+    LIBREOFFICE_BIN=soffice \
+    TESSERACT_BIN=tesseract \
+    OCR_LANG=eng+ind
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json

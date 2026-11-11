@@ -239,3 +239,74 @@ export function extractTxt(bytes: Uint8Array, maxChars = 2_000_000): ExtractionR
   if (budget <= 0) warnings.push('The text file is very large; extraction was truncated.');
   return { units, pageCount: null, method: 'txt', warnings, needsOcr: false };
 }
+
+// ---------------------------------------------------------------------------
+// Images (OCR)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract text from a bitmap image via OCR.
+ *
+ * An image carries no text of its own, so this is the *only* honest way to make
+ * it usable as evidence: if OCR is not configured we return no units and set
+ * `needsOcr`, which the caller turns into `OCR_NOT_CONFIGURED` rather than
+ * silently producing an empty source (or, worse, letting the model invent
+ * content from an unseen picture).
+ */
+export async function extractImage(
+  bytes: Uint8Array,
+  format: 'png' | 'jpeg',
+  options: { ocrEnabled: boolean; nameHint?: string; maxChars?: number },
+): Promise<ExtractionResult> {
+  const maxChars = options.maxChars ?? 2_000_000;
+  if (!options.ocrEnabled) {
+    return {
+      units: [],
+      pageCount: 1,
+      method: 'ocr-http',
+      warnings: [
+        'This is an image, which contains no text until it is scanned by OCR. ' +
+          'Configure OCR (TESSERACT_BIN, or the Docker image which bundles Tesseract) to read images.',
+      ],
+      needsOcr: true,
+    };
+  }
+
+  const { runOcr } = await import('./ocr.js');
+  const raw = await runOcr(bytes, options.nameHint ?? 'image', format);
+  const text = (raw ?? '').replace(/\r\n/g, '\n').trim();
+
+  if (text.length === 0) {
+    return {
+      units: [],
+      pageCount: 1,
+      method: 'ocr-http',
+      warnings: [
+        'OCR ran on this image but found no readable text. It may be a photograph, ' +
+          'a chart without labels, or too low-resolution to read.',
+      ],
+      needsOcr: false,
+    };
+  }
+
+  const warnings: string[] = [
+    'Text was read from an image by OCR, so wording, numbers and spelling may be inexact. Verify anything you cite.',
+  ];
+  const units: ExtractedUnit[] = text
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0)
+    .slice(0, 400)
+    .map((paragraph, index) => ({
+      text: paragraph.slice(0, maxChars),
+      page: 1,
+      paragraphIndex: index,
+      headingPath: null,
+    }));
+
+  if (units.some((unit) => unit.text.length >= maxChars)) {
+    warnings.push('The OCR output is very large; extraction was truncated.');
+  }
+
+  return { units, pageCount: 1, method: 'ocr-http', warnings, needsOcr: false };
+}

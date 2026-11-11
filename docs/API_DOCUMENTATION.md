@@ -265,8 +265,17 @@ Deletes the project, its documents, exports and stored files.
 ## Documents and the template
 
 Uploads are `multipart/form-data` with a `file` part and a `kind` part
-(`template` or `source`). Accepted sources: PDF, DOCX, TXT. OCR is optional and
-requires a server-side engine.
+(`template` or `source`). Templates must be `.docx`. Accepted sources: `.pdf`,
+`.docx`, `.txt`, `.png`, `.jpg`, `.jpeg`.
+
+Each upload is checked by extension, declared MIME type **and** file signature
+(`%PDF`, ZIP/OOXML, `\x89PNG\r\n\x1a\n`, `\xff\xd8\xff`, or text heuristics for
+`.txt`). A renamed file is rejected with `415`/`422` before any parser sees it.
+
+Images carry no text of their own, so they are read with OCR. If OCR is not
+configured, the document is marked `failed` with `OCR_NOT_CONFIGURED` — it is
+never reported as extracted with zero text. When OCR succeeds, the extracted
+text is marked as OCR-derived so the UI can warn that wording may be inexact.
 
 ### `POST /api/projects/:projectId/documents`
 

@@ -127,7 +127,7 @@ export function SourcesPane({
         onDrop={onDrop}
       >
         <p className="text-ink-700">Drag files here</p>
-        <p className="mt-1 text-xs text-ink-500">.docx template · .pdf, .docx, .txt sources</p>
+        <p className="mt-1 text-xs text-ink-500">.docx template · .pdf, .docx, .txt, .png, .jpg sources</p>
         <div className="mt-3 flex flex-wrap justify-center gap-2">
           {!template && (
             <button type="button" className="btn-secondary" onClick={() => templateInput.current?.click()}>

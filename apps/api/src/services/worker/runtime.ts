@@ -11,7 +11,7 @@ import { MappingService } from '../mapping/index.js';
 import { GenerationService } from '../generation/index.js';
 import { ExportService } from '../export/index.js';
 import { UsageService } from '../usage/index.js';
-import { extractDocx, extractPdf, extractTxt } from '../extraction/index.js';
+import { extractDocx, extractImage, extractPdf, extractTxt } from '../extraction/index.js';
 import { isOcrConfigured } from '../extraction/ocr.js';
 import type { StorageAdapter } from '../storage/index.js';
 import type { ProviderRegistry } from '@formaai/ai-providers';
@@ -111,6 +111,11 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
           result = await extractPdf(bytes, { maxPdfPages: services.config.MAX_PDF_PAGES, ocrEnabled: isOcrConfigured() });
         } else if (doc.mimeType.includes('wordprocessingml')) {
           result = await extractDocx(bytes);
+        } else if (doc.mimeType === 'image/png' || doc.mimeType === 'image/jpeg') {
+          result = await extractImage(bytes, doc.mimeType === 'image/jpeg' ? 'jpeg' : 'png', {
+            ocrEnabled: isOcrConfigured(),
+            nameHint: doc.originalName.replace(/\.[^.]+$/, '') || 'image',
+          });
         } else {
           result = extractTxt(bytes);
         }
@@ -124,13 +129,19 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
             headingPath: unit.headingPath,
           }));
         if (chunks.length === 0) {
+          const message =
+            result.warnings.join(' ') || 'No extractable text was found in this document.';
           await services.documents.markStatus(doc.id, ctx.userId, {
             status: 'failed',
-            extractionError:
-              result.warnings.join(' ') || 'No extractable text was found in this document.',
+            extractionError: message,
             extractionMethod: result.method,
           });
-          throw new ApiErrorWithCode('EXTRACTION_EMPTY', 'No extractable text was found in this document.');
+          // An image without OCR is a configuration problem, not an empty file.
+          // Say so explicitly so the user can fix it instead of guessing.
+          throw new ApiErrorWithCode(
+            result.needsOcr ? 'OCR_NOT_CONFIGURED' : 'EXTRACTION_EMPTY',
+            message,
+          );
         }
         await services.documents.replaceChunks(ctx, doc.projectId, doc.id, chunks);
         const wordCount = chunks.reduce((sum, chunk) => sum + chunk.text.split(/\s+/).filter(Boolean).length, 0);

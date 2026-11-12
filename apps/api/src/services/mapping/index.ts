@@ -8,9 +8,16 @@ import type { FactConflict } from '@formaai/shared';
 import type { CredentialService } from '../credentials/index.js';
 import type { FactService } from '../facts/index.js';
 import { completeWithFallback, ProviderError, type ProviderRegistry } from '@formaai/ai-providers';
-import { coverageFromEvidence, loadProjectChunks, rankEvidence, type EvidenceChunk } from './retrieval.js';
+import { coverageFromEvidence, buildTopicPool, loadProjectChunks, rankEvidence, type EvidenceChunk } from './retrieval.js';
 import { buildMappingMessages } from './mapping-prompt.js';
 import { mappingZod, parseModelJson } from '../generation/schemas.js';
+
+/**
+ * Evidence scored at or below this is treated as a topical fallback rather than
+ * a keyword match. Fallback scores are floored at 0.01 by `rankEvidence`, and a
+ * genuine BM25 match on a shared heading word scores well above it.
+ */
+const TOPIC_FALLBACK_MAX_SCORE = 0.01;
 
 const MAPPING_JSON_SCHEMA = {
   name: 'evidence_mapping',
@@ -80,6 +87,13 @@ export function deriveRequirements(heading: string, bodyPreview: string): { requ
   return { requirements: requirements.slice(0, 6), gaps };
 }
 
+const NO_SECTIONS_MESSAGE =
+  'This project has no report sections yet, so there is nothing to map evidence onto. ' +
+  'Upload a DOCX template in the Template & sources panel, then wait for it to be analysed. ' +
+  'If the template uploaded but no sections appeared, FormaAI could not tell which paragraphs are ' +
+  'chapter titles — add sections manually from the outline, or apply Word heading styles (Heading 1, ' +
+  'Heading 2, ...) and upload it again.';
+
 export class MappingService {
   private readonly usage: UsageService;
 
@@ -104,6 +118,22 @@ export class MappingService {
   }
 
   /**
+   * Fails synchronously — before a job is queued — when the project has no
+   * outline to map onto. Without this the request returned 202 and the doomed
+   * job failed in the background (and was retried), so the user only saw
+   * "map evidence failed" with no way to act on it.
+   */
+  async assertCanMap(ctx: AuthContext, projectId: string): Promise<void> {
+    await this.getProject(ctx, projectId);
+    const [row] = await this.db
+      .select({ id: templateSections.id })
+      .from(templateSections)
+      .where(and(eq(templateSections.projectId, projectId), eq(templateSections.userId, ctx.userId)))
+      .limit(1);
+    if (!row) throw conflict(NO_SECTIONS_MESSAGE);
+  }
+
+  /**
    * Builds (and persists) evidence mappings for every non-excluded section.
    * Retrieval is deterministic; when a provider is configured and `useAi` is true
    * an AI pass refines purpose/requirements/plan and may add evidence.
@@ -120,10 +150,13 @@ export class MappingService {
       .where(and(eq(templateSections.projectId, projectId), eq(templateSections.userId, ctx.userId)))
       .orderBy(asc(templateSections.sortOrder));
     if (sections.length === 0) {
-      throw conflict('Analyse a DOCX template before mapping evidence');
+      throw conflict(NO_SECTIONS_MESSAGE);
     }
     const chunks = await loadProjectChunks(this.db, ctx, projectId);
     const conflicts = await this.facts.conflictsForProject(ctx, projectId);
+    // Sections whose headings share no words with the sources (structural
+    // headings like "BAB I PENDAHULUAN") would otherwise map to nothing.
+    const topicPool = buildTopicPool(chunks);
 
     const heuristic: MappingPreview[] = sections.map((section) => {
       const { requirements, gaps } = deriveRequirements(`${section.heading} ${section.bodyPreview ?? ''}`, '');
@@ -134,7 +167,7 @@ export class MappingService {
           bodyPreview: section.bodyPreview ?? undefined,
         },
         chunks,
-        { topK: 6 },
+        { topK: 6, fallback: topicPool, fallbackK: 3 },
       );
       const sectionConflicts = conflicts.filter((conflictItem) =>
         ranked.some((entry) =>
@@ -144,6 +177,15 @@ export class MappingService {
       const combinedGaps = [...gaps];
       if (ranked.length === 0) combinedGaps.unshift('No matching evidence was found in the uploaded sources for this section.');
       const evidenceText = ranked.map((r) => r.chunk.text).join(' ');
+      // Tell the user when the match is topical rather than keyword-based: the
+      // section is draftable, but it deserves a read-through before submitting.
+      const topScore = ranked.reduce((best, entry) => Math.max(best, entry.score), 0);
+      const usedTopicFallback = ranked.length > 0 && topScore <= TOPIC_FALLBACK_MAX_SCORE;
+      if (usedTopicFallback) {
+        combinedGaps.unshift(
+          'This section\'s heading does not appear in the sources, so the most relevant general evidence was used. Review the draft before exporting.',
+        );
+      }
       return {
         sectionId: section.id,
         sectionKey: section.sectionKey,
@@ -187,7 +229,7 @@ export class MappingService {
             }),
             jsonSchema: MAPPING_JSON_SCHEMA,
           },
-          onAttempt: async (credentialId, outcome, error) => {
+          onAttempt: async (credentialId, outcome, error, usage) => {
             await this.usage.record(ctx, {
               projectId,
               credentialId,
@@ -198,8 +240,8 @@ export class MappingService {
               status: outcome,
               errorCode: error?.code,
               durationMs: undefined,
-              inputTokens: undefined,
-              outputTokens: undefined,
+              inputTokens: usage?.inputTokens,
+              outputTokens: usage?.outputTokens,
             });
           },
         });

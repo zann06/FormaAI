@@ -329,3 +329,56 @@ describe('redactSecrets', () => {
   });
 });
 
+/**
+ * The Usage screen showed "56 requests, 0 input tokens, 0 output tokens".
+ * Providers always reported their token counts; `completeWithFallback` simply
+ * never forwarded them to `onAttempt`, so every usage row was logged empty.
+ */
+describe('completeWithFallback usage reporting', () => {
+  const primaryConfig = (): ProviderConfig & { id: string } => ({
+    id: 'cred-primary',
+    providerType: 'anthropic',
+    baseUrl,
+    model: 'claude-test',
+    apiKey: 'anthropic-key',
+  });
+
+  it('passes the provider token counts to onAttempt on success', async () => {
+    const calls: Array<{ outcome: string; usage?: { inputTokens?: number; outputTokens?: number } }> = [];
+    const outcome = await completeWithFallback({
+      registry: new ProviderRegistry({ timeoutMs: 5000 }),
+      primary: primaryConfig(),
+      request: { messages: [{ role: 'user', content: 'ping' }] },
+      onAttempt: (_credentialId, attemptOutcome, _error, usage) => {
+        calls.push({ outcome: attemptOutcome, usage });
+      },
+    });
+
+    expect(outcome.result.text).toBe('anthropic pong');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.outcome).toBe('success');
+    // The exact numbers the adapter parsed from the provider response.
+    expect(calls[0]!.usage?.inputTokens).toBe(20);
+    expect(calls[0]!.usage?.outputTokens).toBe(5);
+  });
+
+  it('forwards usage when a fallback credential is used', async () => {
+    const calls: Array<{ credentialId: string; outcome: string; usage?: { inputTokens?: number } }> = [];
+    await completeWithFallback({
+      registry: new ProviderRegistry({ timeoutMs: 5000 }),
+      // A wrong key makes the primary fail with AUTH_FAILED, which is not
+      // retryable, so the fallback is tried exactly once.
+      primary: { ...primaryConfig(), apiKey: 'wrong-key' },
+      fallback: { ...primaryConfig(), id: 'cred-fallback' },
+      request: { messages: [{ role: 'user', content: 'ping' }] },
+      onAttempt: (credentialId, attemptOutcome, _error, usage) => {
+        calls.push({ credentialId, outcome: attemptOutcome, usage });
+      },
+    });
+    // Primary failed (no usage), fallback succeeded (with usage).
+    expect(calls.map((call) => call.credentialId)).toEqual(['cred-primary', 'cred-fallback']);
+    expect(calls[0]!.usage).toBeUndefined();
+    expect(calls[1]!.usage?.inputTokens).toBe(20);
+  });
+});
+

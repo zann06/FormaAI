@@ -12,6 +12,18 @@ export interface JobPayloads {
   map_evidence: { useAi?: boolean; providerCredentialId?: string };
   generate_section: { sectionId: string; instructions?: string; providerCredentialId?: string; keepEdits?: boolean };
   generate_all: { sectionIds?: string[]; providerCredentialId?: string; regenerateExisting?: boolean };
+  /**
+   * One-click flow: analyse the template, map evidence and draft every section
+   * in a single job. Runs as one job so the user sees one progress bar and one
+   * failure reason instead of a scatter of per-step jobs.
+   */
+  run_pipeline: {
+    useAi?: boolean;
+    providerCredentialId?: string;
+    /** Also produce DOCX/PDF exports when drafting finishes. */
+    exportFormats?: Array<'docx' | 'pdf'>;
+    regenerateExisting?: boolean;
+  };
   assemble_docx: { exportId: string };
   convert_pdf: { exportId: string; docxExportId: string; dependsOnJobId?: string };
   cleanup: { kind: 'sessions' | 'exports' | 'credentials' };

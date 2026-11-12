@@ -32,6 +32,28 @@ const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
 const ZIP_MAGIC_EMPTY = [0x50, 0x4b, 0x05, 0x06];
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]; // \x89PNG\r\n\x1a\n
 const JPEG_MAGIC = [0xff, 0xd8, 0xff]; // SOI + first marker
+// "RIFF" .... "WEBP"
+const WEBP_RIFF_MAGIC = [0x52, 0x49, 0x46, 0x46];
+const WEBP_TAG_MAGIC = [0x57, 0x45, 0x42, 0x50];
+const TIFF_LE_MAGIC = [0x49, 0x49, 0x2a, 0x00]; // II*\0
+const TIFF_BE_MAGIC = [0x4d, 0x4d, 0x00, 0x2a]; // MM\0*
+const BMP_MAGIC = [0x42, 0x4d]; // BM
+const GIF87_MAGIC = [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]; // GIF87a
+const GIF89_MAGIC = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]; // GIF89a
+
+/** iPhone photo formats we reject with conversion instructions. */
+const HEIC_EXTENSIONS: readonly string[] = ['.heic', '.heif'];
+
+/** Canonical MIME type stored for each accepted image extension. */const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.bmp': 'image/bmp',
+  '.gif': 'image/gif',
+};
 
 function startsWith(bytes: Uint8Array, magic: number[]): boolean {
   if (bytes.length < magic.length) return false;
@@ -63,6 +85,17 @@ export function validateUpload(
   const extension = extensionOf(filename);
   const allowed: readonly string[] = options.kind === 'template' ? TEMPLATE_EXTENSIONS : SOURCE_EXTENSIONS;
   if (!allowed.includes(extension)) {
+    // iPhone default photos are HEIC; the decoder behind OCR cannot read them.
+    // Say exactly how to fix it instead of a generic "unsupported" reject.
+    if (HEIC_EXTENSIONS.includes(extension)) {
+      throw new AppError(
+        'UNSUPPORTED_MEDIA_TYPE',
+        `"${filename}" is a HEIC/HEIF image, which cannot be read by OCR. ` +
+          'Convert it to JPG/PNG and upload again. On iPhone, either set ' +
+          'Settings → Camera → Formats → Most Compatible, or in Photos tap Share → ' +
+          '"Copy Photo" and paste it into a message to yourself to get a JPEG.',
+      );
+    }
     throw new AppError(
       'UNSUPPORTED_MEDIA_TYPE',
       options.kind === 'template'
@@ -109,6 +142,28 @@ export function validateUpload(
     if (!startsWith(bytes, JPEG_MAGIC)) {
       throw validationError('This file is not a valid JPEG (signature mismatch); it may have been renamed');
     }
+  } else if (extension === '.webp') {
+    if (!startsWith(bytes, WEBP_RIFF_MAGIC) || !startsWith(bytes.subarray(8), WEBP_TAG_MAGIC)) {
+      throw validationError('This file is not a valid WEBP image (signature mismatch); it may have been renamed');
+    }
+  } else if (extension === '.tif' || extension === '.tiff') {
+    if (!startsWith(bytes, TIFF_LE_MAGIC) && !startsWith(bytes, TIFF_BE_MAGIC)) {
+      throw validationError('This file is not a valid TIFF image (signature mismatch); it may have been renamed');
+    }
+  } else if (extension === '.bmp') {
+    if (!startsWith(bytes, BMP_MAGIC)) {
+      throw validationError('This file is not a valid BMP image (signature mismatch); it may have been renamed');
+    }
+  } else if (extension === '.gif') {
+    if (!startsWith(bytes, GIF87_MAGIC) && !startsWith(bytes, GIF89_MAGIC)) {
+      throw validationError('This file is not a valid GIF image (signature mismatch); it may have been renamed');
+    }
+  } else if (extension === '.zip') {
+    // Same container signature as DOCX; the difference is content, checked when
+    // the archive is expanded into source documents.
+    if (!startsWith(bytes, ZIP_MAGIC) && !startsWith(bytes, ZIP_MAGIC_EMPTY)) {
+      throw validationError('This file is not a valid ZIP archive (signature mismatch); it may have been renamed');
+    }
   }
 
   const mimeType =
@@ -116,11 +171,9 @@ export function validateUpload(
       ? 'application/pdf'
       : extension === '.docx'
         ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : extension === '.png'
-          ? 'image/png'
-          : extension === '.jpg' || extension === '.jpeg'
-            ? 'image/jpeg'
-            : 'text/plain';
+        : extension === '.zip'
+          ? 'application/zip'
+          : IMAGE_MIME_BY_EXTENSION[extension] ?? 'text/plain';
 
   return { extension, mimeType, sizeBytes: bytes.byteLength, bytes };
 }

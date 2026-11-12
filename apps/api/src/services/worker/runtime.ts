@@ -12,11 +12,14 @@ import { GenerationService } from '../generation/index.js';
 import { ExportService } from '../export/index.js';
 import { UsageService } from '../usage/index.js';
 import { extractDocx, extractImage, extractPdf, extractTxt } from '../extraction/index.js';
+import type { OcrImageFormat } from '../extraction/index.js';
 import { isOcrConfigured } from '../extraction/ocr.js';
 import type { StorageAdapter } from '../storage/index.js';
 import type { ProviderRegistry } from '@formaai/ai-providers';
 import type { SafeLogger } from '../../lib/logger.js';
 import { ApiErrorWithCode } from './errors.js';
+import { runPipeline } from './pipeline.js';
+import { AppError } from '../../lib/errors.js';
 
 export interface WorkerServices {
   db: Database;
@@ -75,10 +78,42 @@ export function createServices(input: {
 
 export type AllServices = ReturnType<typeof createServices>;
 
+/**
+ * Maps a stored MIME type (falling back to the original filename) to the OCR
+ * image format. Every extension the upload validator accepts has an entry, so
+ * no accepted image can fall through to the text extractor and fail.
+ */
+function imageFormatFor(mimeType: string, originalName: string): OcrImageFormat {
+  const byMime: Record<string, OcrImageFormat> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpeg',
+    'image/jpg': 'jpeg',
+    'image/webp': 'webp',
+    'image/tiff': 'tiff',
+    'image/bmp': 'bmp',
+    'image/x-ms-bmp': 'bmp',
+    'image/gif': 'gif',
+  };
+  const fromMime = byMime[mimeType.toLowerCase()];
+  if (fromMime) return fromMime;
+  const extension = originalName.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
+  const byExtension: Record<string, OcrImageFormat> = {
+    '.png': 'png',
+    '.jpg': 'jpeg',
+    '.jpeg': 'jpeg',
+    '.webp': 'webp',
+    '.tif': 'tiff',
+    '.tiff': 'tiff',
+    '.bmp': 'bmp',
+    '.gif': 'gif',
+  };
+  return byExtension[extension] ?? 'png';
+}
+
 /** Runs one job to completion. Used by the worker loop and by tests. */
 export async function executeJob(services: AllServices, jobId: string): Promise<void> {
   const { db, logger } = services;
-  const { processingJobs } = await import('../../db/schema.js');
+  const { processingJobs, projects } = await import('../../db/schema.js');
   const { and, eq } = await import('drizzle-orm');
 
   const [job] = await db.select().from(processingJobs).where(eq(processingJobs.id, jobId)).limit(1);
@@ -111,8 +146,8 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
           result = await extractPdf(bytes, { maxPdfPages: services.config.MAX_PDF_PAGES, ocrEnabled: isOcrConfigured() });
         } else if (doc.mimeType.includes('wordprocessingml')) {
           result = await extractDocx(bytes);
-        } else if (doc.mimeType === 'image/png' || doc.mimeType === 'image/jpeg') {
-          result = await extractImage(bytes, doc.mimeType === 'image/jpeg' ? 'jpeg' : 'png', {
+        } else if (doc.mimeType.startsWith('image/')) {
+          result = await extractImage(bytes, imageFormatFor(doc.mimeType, doc.originalName), {
             ocrEnabled: isOcrConfigured(),
             nameHint: doc.originalName.replace(/\.[^.]+$/, '') || 'image',
           });
@@ -241,6 +276,40 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
         }
         break;
       }
+      case 'run_pipeline': {
+        const payload = job.payload as {
+          useAi?: boolean;
+          providerCredentialId?: string;
+          exportFormats?: Array<'docx' | 'pdf'>;
+          regenerateExisting?: boolean;
+        };
+        await markStage('starting', 5);
+        const outcome = await runPipeline(services, ctx, job.projectId, jobId, payload, markStage);
+        await markStage('done', 100);
+        await db
+          .update(processingJobs)
+          .set({
+            result: {
+              summary: outcome.summary,
+              steps: outcome.steps,
+              sections: outcome.sections,
+              drafted: outcome.drafted,
+              failedSections: outcome.failedSections,
+              exports: outcome.exports,
+            },
+          })
+          .where(eq(processingJobs.id, jobId));
+        // Surface a genuine failure instead of a green "succeeded" with no text.
+        const failedStep = outcome.steps.find((step) => step.status === 'failed');
+        if (failedStep) {
+          throw new ApiErrorWithCode('PIPELINE_FAILED', `${failedStep.message}`, {
+            summary: outcome.summary,
+            steps: outcome.steps,
+            exports: outcome.exports,
+          });
+        }
+        break;
+      }
       case 'assemble_docx': {
         const payload = job.payload as { exportId: string };
         await markStage('assembling', 40);
@@ -280,7 +349,15 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
     const code = error instanceof ApiErrorWithCode ? error.code : 'JOB_FAILED';
     const message = (error as Error).message.slice(0, 2000);
     const attempts = job.attempts + 1;
-    const willRetry = attempts < job.maxAttempts;
+    // A rejected precondition (no sections, unsupported file, missing converter)
+    // cannot fix itself between attempts. Retrying it only multiplied the
+    // "failed" rows and made a single mistake look like a recurring crash.
+    const retryable =
+      !(error instanceof AppError) ||
+      error.status >= 500 ||
+      error.code === 'RATE_LIMITED' ||
+      error.code === 'QUOTA_EXCEEDED';
+    const willRetry = retryable && attempts < job.maxAttempts;
     await db
       .update(processingJobs)
       .set({
@@ -290,6 +367,11 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
         attempts,
         finishedAt: willRetry ? null : new Date(),
         updatedAt: new Date(),
+        // Keep any structured context the step reported, so the UI can list what
+        // did and did not happen instead of showing one opaque line.
+        ...(error instanceof ApiErrorWithCode && error.details
+          ? { result: error.details as Record<string, unknown> }
+          : {}),
       })
       .where(eq(processingJobs.id, jobId));
     if (job.kind === 'extract_document') {
@@ -300,6 +382,15 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
           extractionError: message,
         });
       }
+    }
+    if (job.kind === 'analyze_template' && !willRetry) {
+      // Uploading a template parks the project on "processing" while analysis
+      // runs. If that analysis never succeeds, nothing else will move it, so the
+      // project would show "Processing" forever. Mark it failed instead.
+      await db
+        .update(projects)
+        .set({ status: 'failed', updatedAt: new Date() })
+        .where(and(eq(projects.id, job.projectId), eq(projects.userId, job.userId)));
     }
     logger.error('Job failed', { jobId, kind: job.kind, code, attempts });
     if (!willRetry) throw error;

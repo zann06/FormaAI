@@ -10,12 +10,48 @@ export const MAX_PROJECTS_PER_USER = 100;
 /** Maximum total storage per user (bytes). Overridable via USER_STORAGE_QUOTA_MB. */
 export const DEFAULT_USER_STORAGE_QUOTA_MB = 1024;
 
-export const SOURCE_EXTENSIONS = ['.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg'] as const;
+export const SOURCE_EXTENSIONS = [
+  '.pdf',
+  '.docx',
+  '.txt',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.tif',
+  '.tiff',
+  '.bmp',
+  '.gif',
+  '.zip',
+] as const;
 export const TEMPLATE_EXTENSIONS = ['.docx'] as const;
 export const EXTENSIBLE_SOURCE_EXTENSIONS = ['.xlsx', '.csv', '.pptx'] as const;
 
-/** Source formats that carry no text of their own and therefore require OCR. */
-export const IMAGE_SOURCE_EXTENSIONS = ['.png', '.jpg', '.jpeg'] as const;
+/**
+ * Archives that are unpacked server-side; every supported file inside becomes
+ * its own source document. Students routinely receive a case packet as one ZIP.
+ */
+export const ARCHIVE_SOURCE_EXTENSIONS = ['.zip'] as const;
+
+/** Limits for archive expansion, chosen to stop zip bombs. */
+export const ARCHIVE_LIMITS = {
+  /** Files we will extract from a single archive. */
+  maxEntries: 40,
+  /** Guard against a small archive expanding to gigabytes (ratio × uploaded size). */
+  maxExpansionRatio: 100,
+  /** Per-entry cap (same as the normal upload limit). */
+  maxEntryBytes: 25 * 1024 * 1024,
+} as const;
+
+export function isArchiveSourceExtension(extension: string): boolean {
+  return (ARCHIVE_SOURCE_EXTENSIONS as readonly string[]).includes(extension.toLowerCase());
+}
+
+/**
+ * Source formats that carry no text of their own and therefore require OCR.
+ * Phone screenshots are frequently `.webp`, and scanners often emit `.tif`.
+ */
+export const IMAGE_SOURCE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.tif', '.tiff', '.bmp', '.gif'] as const;
 
 export function isImageSourceExtension(extension: string): boolean {
   return (IMAGE_SOURCE_EXTENSIONS as readonly string[]).includes(extension.toLowerCase());
@@ -33,6 +69,12 @@ export const MIME_BY_EXTENSION: Record<string, string[]> = {
   '.png': ['image/png', 'application/octet-stream'],
   '.jpg': ['image/jpeg', 'image/jpg', 'application/octet-stream'],
   '.jpeg': ['image/jpeg', 'image/jpg', 'application/octet-stream'],
+  '.webp': ['image/webp', 'application/octet-stream'],
+  '.tif': ['image/tiff', 'application/octet-stream'],
+  '.tiff': ['image/tiff', 'application/octet-stream'],
+  '.bmp': ['image/bmp', 'image/x-ms-bmp', 'application/octet-stream'],
+  '.gif': ['image/gif', 'application/octet-stream'],
+  '.zip': ['application/zip', 'application/x-zip-compressed', 'application/octet-stream'],
 };
 
 export const PROJECT_STATUSES = ['draft', 'processing', 'needs_review', 'ready', 'failed', 'archived'] as const;
@@ -46,6 +88,7 @@ export const JOB_KINDS = [
   'map_evidence',
   'generate_section',
   'generate_all',
+  'run_pipeline',
   'assemble_docx',
   'convert_pdf',
   'cleanup',

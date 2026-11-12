@@ -211,8 +211,131 @@ export function paragraphOutlineLevel(paragraph: XmlNode): number | null {
   return Number.isFinite(val) ? val : null;
 }
 
+/** Paragraph alignment as Word writes it (`left`, `center`, `right`, `both`). */
+export function paragraphAlignment(paragraph: XmlNode): string | null {
+  const pPr = findChild(paragraph, 'w:pPr');
+  if (!pPr) return null;
+  const jc = findChild(pPr, 'w:jc');
+  return jc?.attrs['w:val'] ?? null;
+}
+
+/** Nesting level of a numbered/bulleted paragraph, or null when it is not a list item. */
+export function paragraphNumberingLevel(paragraph: XmlNode): number | null {
+  const pPr = findChild(paragraph, 'w:pPr');
+  const numPr = pPr ? findChild(pPr, 'w:numPr') : undefined;
+  if (!numPr) return null;
+  const ilvl = findChild(numPr, 'w:ilvl');
+  const level = ilvl ? Number(ilvl.attrs['w:val']) : 0;
+  return Number.isFinite(level) ? level : 0;
+}
+
+/** True when `w:b` is present and not explicitly turned off. */
+export function runBold(run: XmlNode): boolean | null {
+  const rPr = findChild(run, 'w:rPr');
+  if (!rPr) return null;
+  const bold = findChild(rPr, 'w:b');
+  if (!bold) return null;
+  const value = bold.attrs['w:val'];
+  return !(value === '0' || value === 'false' || value === 'off');
+}
+
+/** Font size of a run's direct formatting, in half-points (Word's unit). */
+export function runSizeHalfPoints(run: XmlNode): number | null {
+  const rPr = findChild(run, 'w:rPr');
+  if (!rPr) return null;
+  const size = findChild(rPr, 'w:sz');
+  if (!size) return null;
+  const value = Number(size.attrs['w:val']);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export function isParagraph(node: XmlNode): boolean {
   return node.tag === 'w:p';
+}
+
+/**
+ * Builds a real Word table (`<w:tbl>`) from generated cells.
+ *
+ * Written as XML nodes rather than a hand-made string so the existing
+ * serializer handles escaping. Borders are explicit because a table without
+ * `<w:tblBorders>` renders borderless, which reads as broken in a printed report.
+ */
+export function createTable(
+  table: { columns: string[]; rows: string[][]; caption?: string | null },
+  options: { runProps?: XmlNode | null } = {},
+): XmlNode[] {
+  const nodes: XmlNode[] = [];
+
+  if (table.caption && table.caption.trim()) {
+    nodes.push({
+      tag: 'w:p',
+      attrs: {},
+      children: [{ tag: 'w:r', attrs: {}, children: [{ tag: 'w:t', attrs: {}, children: [{ tag: '#text', attrs: {}, children: [], text: table.caption.trim() }] }] }],
+    });
+  }
+
+  const borders = {
+    tag: 'w:tblBorders',
+    attrs: {},
+    children: ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map((side) => ({
+      tag: `w:${side}`,
+      attrs: { 'w:val': 'single', 'w:sz': '4', 'w:space': '0', 'w:color': '000000' },
+      children: [],
+    })),
+  };
+
+  const makeRow = (cells: string[], header: boolean): XmlNode => ({
+    tag: 'w:tr',
+    attrs: {},
+    children: cells.map((cell) => ({
+      tag: 'w:tc',
+      attrs: {},
+      children: [
+        {
+          tag: 'w:tcPr',
+          attrs: {},
+          children: header ? [{ tag: 'w:shd', attrs: { 'w:val': 'clear', 'w:fill': 'E8EDF2' }, children: [] }] : [],
+        },
+        createParagraph(cell, {
+          runProps: header ? { tag: 'w:rPr', attrs: {}, children: [{ tag: 'w:b', attrs: {}, children: [] }] } : options.runProps ?? null,
+        }),
+      ],
+    })),
+  });
+
+  const columnCount = Math.max(1, table.columns.length);
+  nodes.push({
+    tag: 'w:tbl',
+    attrs: {},
+    children: [
+      {
+        tag: 'w:tblPr',
+        attrs: {},
+        children: [
+          { tag: 'w:tblW', attrs: { 'w:w': '5000', 'w:type': 'pct' }, children: [] },
+          borders,
+        ],
+      },
+      {
+        tag: 'w:tblGrid',
+        attrs: {},
+        children: table.columns.map(() => ({ tag: 'w:gridCol', attrs: {}, children: [] })),
+      },
+      makeRow(table.columns, true),
+      // Normalise every row to the header width: a short row makes Word drop
+      // cells and shift the following ones, which looked like data corruption.
+      ...table.rows.map((row) => {
+        const cells = row.slice(0, columnCount);
+        while (cells.length < columnCount) cells.push('');
+        return makeRow(cells, false);
+      }),
+    ],
+  });
+
+  // An empty paragraph after the table keeps it from merging with the next
+  // section's heading when Word continues the document.
+  nodes.push({ tag: 'w:p', attrs: {}, children: [] });
+  return nodes;
 }
 
 export function directParagraphs(container: XmlNode): XmlNode[] {

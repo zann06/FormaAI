@@ -25,6 +25,10 @@ export async function registerPlugins(instance: FastifyInstance, options: Server
       parts: 12,
     },
     throwFileSizeLimit: true,
+    // `true` (not `keyValues`) so the file part keeps its `filename`, `mimetype`
+    // and `toBuffer()`. Text fields arrive as `{ value }` objects, still regardless
+    // of where they appear in the stream.
+    attachFieldsToBody: true,
   });
   await instance.register(fastifyRateLimit, {
     global: true,

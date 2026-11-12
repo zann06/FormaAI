@@ -77,6 +77,28 @@ export class CredentialService {
     return rows.map((row) => this.toPublic(row));
   }
 
+  /**
+   * Fails fast when the user has no provider configured.
+   *
+   * Drafting is the only pipeline step that needs a model, and it runs last — so
+   * without this check a scan would analyse the template, map every section, and
+   * only then fail, after minutes of work, with an error that reads as if the
+   * sources were the problem. Answering up front turns that into one clear
+   * instruction before anything is queued.
+   */
+  async assertHasProvider(ctx: AuthContext): Promise<void> {
+    const [existing] = await this.db
+      .select({ id: providerCredentials.id })
+      .from(providerCredentials)
+      .where(eq(providerCredentials.userId, ctx.userId))
+      .limit(1);
+    if (!existing) {
+      throw validationError(
+        'No AI provider is configured. Add your own provider and API key in Settings → AI providers before generating a report.',
+      );
+    }
+  }
+
   async create(ctx: AuthContext, input: ProviderCredentialCreateInput): Promise<PublicCredential> {
     if (input.providerType === 'dev-offline' && !this.config.ENABLE_DEV_PROVIDER) {
       throw forbidden('The offline development provider is disabled on this instance');

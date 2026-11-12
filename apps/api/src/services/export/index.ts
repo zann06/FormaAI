@@ -16,8 +16,10 @@ import { assembleDocx, readDocxPackage, xmlToString } from '@formaai/docx-engine
 import { analyzeDocumentXml } from '@formaai/docx-engine';
 import { sha256Hex } from '../../lib/crypto.js';
 import { convertDocxToPdf, isPdfConverterConfigured, validatePdf } from './pdf.js';
+import { renderDocxPreview } from './preview.js';
 import { buildStorageKey } from '../storage/index.js';
 import { safeFilename } from '@formaai/shared';
+import { classifySection, shouldKeepTemplateText } from '@formaai/shared';
 
 export interface AssemblyInput {
   ctx: AuthContext;
@@ -25,12 +27,49 @@ export interface AssemblyInput {
   jobId?: string;
 }
 
+/**
+ * True when the stored content is nothing but a "[MISSING: ...]" marker.
+ *
+ * Generation writes such a marker when no evidence could be mapped, so that the
+ * gap is visible instead of inventing text. Treating that marker as "empty" for
+ * the required-section check keeps a handful of unsupported sections (cover
+ * pages, appendices) from blocking an otherwise finished report.
+ */
+export function isPlaceholderOnly(content: string | null | undefined): boolean {
+  if (!content) return false;
+  const stripped = content.replace(/\[MISSING:[^\]]*\]/gi, '').trim();
+  return stripped.length === 0 && /\[MISSING:/i.test(content);
+}
+
 export class ExportService {
+  /**
+   * In-memory page-preview cache, keyed by the hash of the assembled DOCX.
+   *
+   * Rendering takes ~10 s because LibreOffice has to start and lay the document
+   * out. Without a cache every visit to the Preview tab would pay that cost again.
+   * Keyed by content, so editing a section produces a different DOCX and therefore
+   * a fresh render — the cache can never serve stale pages.
+   */
+  private readonly previewCache = new Map<string, Awaited<ReturnType<typeof renderDocxPreview>>>();
+  private static readonly PREVIEW_CACHE_LIMIT = 12;
+
   constructor(
     private readonly db: Database,
     private readonly storage: StorageAdapter,
     private readonly config: AppConfig,
   ) {}
+
+  private readonly previewCacheAdapter = {
+    get: async (key: string) => this.previewCache.get(key) ?? null,
+    set: async (key: string, value: Awaited<ReturnType<typeof renderDocxPreview>>) => {
+      // Bounded LRU-ish eviction: previews are large (hundreds of KB per page).
+      if (this.previewCache.size >= ExportService.PREVIEW_CACHE_LIMIT) {
+        const oldest = this.previewCache.keys().next().value;
+        if (oldest) this.previewCache.delete(oldest);
+      }
+      this.previewCache.set(key, value);
+    },
+  };
 
   async assertProject(ctx: AuthContext, projectId: string) {
     const [project] = await this.db
@@ -56,7 +95,13 @@ export class ExportService {
       .where(and(eq(reportSections.projectId, projectId), eq(reportSections.userId, ctx.userId)));
     if (sections.length === 0) throw conflict('Generate at least one section before exporting');
     const emptyRequired = await this.db
-      .select({ heading: templateSections.heading })
+      .select({
+        heading: templateSections.heading,
+        level: templateSections.level,
+        sortOrder: templateSections.sortOrder,
+        styleId: templateSections.styleId,
+        content: reportSections.content,
+      })
       .from(templateSections)
       .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
       .where(
@@ -68,11 +113,36 @@ export class ExportService {
           sql`(coalesce(${reportSections.content}, '') = '')`,
         ),
       );
-    if (emptyRequired.length > 0) {
+    // A [MISSING: ...] placeholder means "no evidence was mapped here". That is
+    // worth warning about, but it must not block the whole export: on a real
+    // campus template a handful of cover-page or appendix sections have no source
+    // material, and refusing to export left 40 finished sections trapped behind
+    // them. The placeholder stays visible in the document so the gap is obvious.
+    const firstSortOrder = emptyRequired.reduce((min, row) => Math.min(min, row.sortOrder), Number.MAX_SAFE_INTEGER);
+    const emptyHeadings = emptyRequired
+      .filter((section) => !isPlaceholderOnly(section.content))
+      // Cover lines and rubric sheets are intentionally left with no stored body:
+      // their text already exists in the template, so "empty" here is correct and
+      // blocking on it would make every campus cover page unexportable.
+      .filter(
+        (section) =>
+          !shouldKeepTemplateText(
+            classifySection({
+              heading: section.heading,
+              level: section.level,
+              nearStart: section.sortOrder - firstSortOrder < 8,
+              // Same signal the generator uses, so the two can never disagree
+              // about which sections are deliberately left to the template.
+              isTitleStyle: /^(title|subtitle|coverpage|cover)$/i.test(section.styleId ?? ''),
+            }),
+          ),
+      )
+      .map((section) => section.heading);
+    if (emptyHeadings.length > 0) {
       throw conflict(
-        `These required sections are still empty: ${emptyRequired
+        `These required sections are still empty: ${emptyHeadings
           .slice(0, 5)
-          .map((s) => s.heading)
+          .map((heading) => heading)
           .join(', ')}. Generate or write them, or mark them as not required in the outline.`,
       );
     }
@@ -147,6 +217,7 @@ export class ExportService {
         bodyPreview: templateSections.bodyPreview,
         content: reportSections.content,
         status: reportSections.status,
+        tableData: reportSections.tableData,
       })
       .from(templateSections)
       .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
@@ -173,6 +244,7 @@ export class ExportService {
         insertionStrategy: row.strategy as 'placeholder' | 'after_heading' | 'manual',
         placeholder: row.placeholder,
         content: row.content ?? '',
+        table: row.tableData ?? null,
         skip: row.excluded,
       })),
     });
@@ -206,6 +278,81 @@ export class ExportService {
       .returning();
 
     return { artifactId: updated!.id, fidelity: result.fidelity };
+  }
+
+  /**
+   * Builds the DOCX that the export WOULD produce right now, without recording an
+   * export artifact or consuming the daily quota, then renders its first pages as
+   * PNGs.
+   *
+   * This reuses `assemble`'s inputs so the preview cannot drift from the real
+   * export: same template, same sections, same insertion strategy.
+   */
+  async renderPreview(
+    ctx: AuthContext,
+    projectId: string,
+    options: { maxPages?: number } = {},
+  ): Promise<Awaited<ReturnType<typeof renderDocxPreview>>> {
+    const project = await this.assertProject(ctx, projectId);
+
+    const [template] = await this.db
+      .select()
+      .from(documents)
+      .where(
+        and(eq(documents.projectId, projectId), eq(documents.userId, ctx.userId), eq(documents.kind, 'template')),
+      )
+      .limit(1);
+    if (!template) throw conflict('Upload a DOCX template before previewing the report');
+
+    const rows = await this.db
+      .select({
+        sectionId: templateSections.id,
+        heading: templateSections.heading,
+        paragraphIndex: templateSections.paragraphIndex,
+        strategy: templateSections.insertionStrategy,
+        placeholder: templateSections.placeholder,
+        excluded: templateSections.excluded,
+        content: reportSections.content,
+        tableData: reportSections.tableData,
+      })
+      .from(templateSections)
+      .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
+      .where(and(eq(templateSections.projectId, projectId), eq(templateSections.userId, ctx.userId)))
+      .orderBy(templateSections.sortOrder);
+
+    const templateBytes = await this.storage.get(template.storageKey);
+    const assembled = assembleDocx(templateBytes, {
+      globalPlaceholders: {
+        report_title: project.title ?? '',
+        report_type: project.reportType ?? '',
+        generated_date: new Date().toISOString().slice(0, 10),
+      },
+      sections: rows.map((row) => ({
+        sectionId: row.sectionId,
+        headingText: row.heading,
+        paragraphIndex: row.paragraphIndex,
+        insertionStrategy: row.strategy as 'placeholder' | 'after_heading' | 'manual',
+        placeholder: row.placeholder,
+        content: row.content ?? '',
+        table: row.tableData ?? null,
+        skip: row.excluded,
+      })),
+    });
+
+    return renderDocxPreview(assembled.buffer, this.config, {
+      maxPages: options.maxPages,
+      // Key on the *inputs*, not the output bytes: assembling stamps the current
+      // date into the document, so identical content still yields different bytes
+      // and a byte hash would always miss.
+      cacheKey: sha256Hex(
+        JSON.stringify({
+          title: project.title ?? '',
+          template: template.storageKey,
+          sections: rows.map((row) => [row.sectionId, row.excluded, row.content ?? '']),
+        }),
+      ),
+      cache: this.previewCacheAdapter,
+    });
   }
 
   async convertToPdf(ctx: AuthContext, exportId: string, docxExportId: string) {

@@ -44,3 +44,11 @@ Thumbs.db
 # Scratch / probe files used during development
 probe*.ts
 probe*.log
+
+# Documentation kept locally but not published. README.md is the single
+# Markdown document in the repository; the rest stay on disk for the author.
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+MASTER_PROMPT.md
+SECURITY.md
+docs/*.md

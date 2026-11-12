@@ -203,13 +203,27 @@ export class TestClient {
     return this.request('DELETE', url, body === undefined ? {} : { body });
   }
 
-  /** Uploads a file the same way the browser does (multipart/form-data). */
-  upload(url: string, file: { name: string; type: string; bytes: Uint8Array }, kind?: 'template' | 'source') {
+  /**
+   * Uploads a file the same way the browser does (multipart/form-data).
+   *
+   * `kindLast` appends the "kind" field *after* the file, which is what a browser
+   * FormData does when the file is appended first. @fastify/multipart only exposes
+   * fields parsed before the file part, so this ordering used to silently drop the
+   * field and store every upload as a "source" — the exact bug that made a template
+   * uploaded from the chat become a plain source file.
+   */
+  upload(
+    url: string,
+    file: { name: string; type: string; bytes: Uint8Array },
+    kind?: 'template' | 'source',
+    options: { kindLast?: boolean } = {},
+  ) {
     const form = new FormData();
-    if (kind) form.append('kind', kind);
+    if (kind && !options.kindLast) form.append('kind', kind);
     const copy = new Uint8Array(file.bytes.byteLength);
     copy.set(file.bytes);
     form.append('file', new Blob([copy], { type: file.type }), file.name);
+    if (kind && options.kindLast) form.append('kind', kind);
     return this.request('POST', url, { payload: form });
   }
 }

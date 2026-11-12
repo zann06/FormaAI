@@ -85,6 +85,12 @@ describe('cross-tenant isolation', () => {
     expect(jobs.status).toBe(200);
     expect(jobs.body.jobs).toHaveLength(0);
   });
+
+  it('blocks running the one-click pipeline on another user\'s project', async () => {
+    const scan = await bob.client.post(`/api/projects/${aliceProjectId}/pipeline`, { useAi: false });
+    // 404, not 403: the project must not even be confirmed to exist.
+    expect(scan.status).toBe(404);
+  });
 });
 
 describe('provider credential security', () => {
@@ -205,6 +211,37 @@ describe('upload validation', () => {
   it('rejects a non-multipart upload with a clear error', async () => {
     const response = await alice.client.post(`/api/projects/${aliceProjectId}/documents`, { file: 'nope' });
     expect(response.status).toBe(400);
+  });
+
+  /**
+   * The reported bug: a .docx uploaded from the chat was stored as `source`, so the
+   * project never got a template, no outline was created, and "Scan & generate"
+   * stayed disabled while the chat looked like it was doing something.
+   *
+   * Cause: @fastify/multipart only exposes fields parsed *before* the file part, and
+   * the browser appended "kind" after the file. The field was dropped and the
+   * handler fell back to "source". The server must not depend on field order.
+   */
+  it('honours the kind field even when it is sent after the file', async () => {
+    const project = await alice.client.post('/api/projects', { title: 'Kind order', language: 'en', tone: 'formal' });
+    expect(project.status).toBe(201);
+    const projectId = project.body.project.id as string;
+
+    const response = await alice.client.upload(
+      `/api/projects/${projectId}/documents`,
+      { name: 'template.docx', type: DOCX_MIME, bytes: reportTemplateDocx() },
+      'template',
+      { kindLast: true },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.document.kind).toBe('template');
+
+    // It must also be recognised as the project's template, which is what enables
+    // generation. Storing the row is not enough on its own.
+    const documents = await alice.client.get(`/api/projects/${projectId}/documents`);
+    const stored = (documents.body.documents as Array<{ kind: string }>).filter((doc) => doc.kind === 'template');
+    expect(stored).toHaveLength(1);
   });
 });
 

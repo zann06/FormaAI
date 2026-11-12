@@ -8,6 +8,9 @@
  */
 import { analyzeDocumentXml, bodyItems, findChild, paragraphText, parseXml } from '@formaai/docx-engine';
 import type { XmlNode } from '@formaai/docx-engine';
+import type { OcrImageFormat } from './ocr.js';
+
+export type { OcrImageFormat };
 
 export interface ExtractedUnit {
   text: string;
@@ -252,10 +255,14 @@ export function extractTxt(bytes: Uint8Array, maxChars = 2_000_000): ExtractionR
  * `needsOcr`, which the caller turns into `OCR_NOT_CONFIGURED` rather than
  * silently producing an empty source (or, worse, letting the model invent
  * content from an unseen picture).
+ *
+ * Every extension in IMAGE_SOURCE_EXTENSIONS is accepted here. The actual
+ * decoding is done by the OCR adapter, which re-encodes the image to PNG so all
+ * formats follow one readable code path.
  */
 export async function extractImage(
   bytes: Uint8Array,
-  format: 'png' | 'jpeg',
+  format: OcrImageFormat,
   options: {
     ocrEnabled: boolean;
     nameHint?: string;
@@ -264,7 +271,7 @@ export async function extractImage(
      * Injectable OCR function. Defaults to the real adapter; tests supply a stub
      * so the empty-result branch can be exercised without a Tesseract binary.
      */
-    ocr?: (image: Uint8Array, nameHint: string, format: 'png' | 'jpeg') => Promise<string | null>;
+    ocr?: (image: Uint8Array, nameHint: string, format: OcrImageFormat) => Promise<string | null>;
   },
 ): Promise<ExtractionResult> {
   const maxChars = options.maxChars ?? 2_000_000;
@@ -283,7 +290,19 @@ export async function extractImage(
 
   const runOcrFn =
     options.ocr ?? ((await import('./ocr.js')).runOcr as NonNullable<typeof options.ocr>);
-  const raw = await runOcrFn(bytes, options.nameHint ?? 'image', format);
+  let raw: string | null;
+  try {
+    raw = await runOcrFn(bytes, options.nameHint ?? 'image', format);
+  } catch (error) {
+    // The image reached OCR but could not be decoded (truncated download,
+    // wrong extension, unreadable scan). Say so instead of reporting "no text".
+    const detail =
+      (error instanceof Error ? error.message.split('\n')[0] : String(error)) || 'unknown error';
+    throw new Error(
+      `The ${format.toUpperCase()} image could not be read by OCR: ${detail.slice(0, 200)}. ` +
+        'If the file opens on your device, re-save it as PNG or JPG and upload it again.',
+    );
+  }
   const text = (raw ?? '').replace(/\r\n/g, '\n').trim();
 
   if (text.length === 0) {

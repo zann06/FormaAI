@@ -36,6 +36,7 @@ export function SourcesPane({
 
   const template = documents?.find((doc) => doc.kind === 'template');
   const sources = documents?.filter((doc) => doc.kind === 'source') ?? [];
+  const failedSources = sources.filter((doc) => doc.status === 'failed');
 
   async function uploadFiles(files: File[], kind: 'template' | 'source') {
     if (files.length === 0) return;
@@ -51,17 +52,39 @@ export function SourcesPane({
 
     setUploading(true);
     let ok = 0;
+    let fromArchives = 0;
+    let skippedFromArchives = 0;
     for (const file of accepted) {
       try {
-        await api.upload(`/api/projects/${projectId}/documents`, file, kind);
+        const response = await api.upload<
+          { jobId?: string; archive?: { added: number; skipped: Array<{ path: string; reason: string }> } }
+        >(`/api/projects/${projectId}/documents`, file, kind);
         ok += 1;
+        // A .zip is unpacked server-side into several documents; report what
+        // came out of it so the user is not surprised by extra sources, and what
+        // was ignored so a missing file is never silent.
+        if (response?.archive) {
+          fromArchives += response.archive.added;
+          skippedFromArchives += response.archive.skipped.length;
+          const reasons = response.archive.skipped.slice(0, 3).map((entry) => `${entry.path} — ${entry.reason}`);
+          toast.info(
+            `“${file.name}” unpacked into ${response.archive.added} source file${
+              response.archive.added === 1 ? '' : 's'
+            }.` + (reasons.length > 0 ? ` Skipped: ${reasons.join('; ')}${response.archive.skipped.length > 3 ? '…' : ''}` : ''),
+          );
+        }
       } catch (error) {
         toast.error(`${file.name}: ${errorMessage(error)}`);
       }
     }
     setUploading(false);
     if (ok > 0) {
-      toast.success(`Uploaded ${ok} file${ok === 1 ? '' : 's'}. Processing started.`);
+      toast.success(
+        `Uploaded ${ok} file${ok === 1 ? '' : 's'}` +
+          (fromArchives > 0 ? ` (${fromArchives} from archives)` : '') +
+          (skippedFromArchives > 0 ? `, ${skippedFromArchives} skipped` : '') +
+          '. Processing started.',
+      );
       onChanged();
     }
   }
@@ -127,7 +150,10 @@ export function SourcesPane({
         onDrop={onDrop}
       >
         <p className="text-ink-700">Drag files here</p>
-        <p className="mt-1 text-xs text-ink-500">.docx template · .pdf, .docx, .txt, .png, .jpg sources</p>
+        <p className="mt-1 text-xs text-ink-500">
+          .docx template · .pdf, .docx, .txt, .zip sources · .png, .jpg, .jpeg, .webp, .tif, .bmp, .gif images
+          (read by OCR). A .zip is unpacked automatically.
+        </p>
         <div className="mt-3 flex flex-wrap justify-center gap-2">
           {!template && (
             <button type="button" className="btn-secondary" onClick={() => templateInput.current?.click()}>
@@ -174,6 +200,12 @@ export function SourcesPane({
         <h3 className="mb-2 mt-4 px-1 text-xs font-semibold uppercase tracking-wide text-ink-500">
           Sources ({sources.length})
         </h3>
+        {failedSources.length > 0 && (
+          <p className="mb-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-800">
+            {failedSources.length === 1 ? '1 source could not be read' : `${failedSources.length} sources could not be read`}
+            , so its text is not available as evidence. Use <strong>Retry extraction</strong> to try again.
+          </p>
+        )}
         {documents && sources.length === 0 && (
           <p className="px-1 text-sm text-ink-500">No source documents yet. Add the files the report should cite.</p>
         )}
@@ -195,19 +227,26 @@ export function SourcesPane({
             <h3 className="mb-2 mt-4 px-1 text-xs font-semibold uppercase tracking-wide text-ink-500">Recent activity</h3>
             <ul className="space-y-1 text-xs text-ink-600">
               {latestJobs.slice(0, 6).map((job) => (
-                <li key={job.id} className="flex items-center gap-2 px-1">
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      job.status === 'failed'
-                        ? 'bg-red-500'
-                        : job.status === 'succeeded'
-                          ? 'bg-emerald-500'
-                          : 'bg-brand-500'
-                    }`}
-                    aria-hidden
-                  />
-                  <span className="truncate">{job.kind.replace(/_/g, ' ')}</span>
-                  <span className="ml-auto shrink-0 text-ink-400">{job.status}</span>
+                <li key={job.id} className="px-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        job.status === 'failed'
+                          ? 'bg-red-500'
+                          : job.status === 'succeeded'
+                            ? 'bg-emerald-500'
+                            : 'bg-brand-500'
+                      }`}
+                      aria-hidden
+                    />
+                    <span className="truncate">{job.kind.replace(/_/g, ' ')}</span>
+                    <span className="ml-auto shrink-0 text-ink-400">{job.status}</span>
+                  </div>
+                  {job.status === 'failed' && (
+                    <p className="mt-0.5 pl-3.5 text-[11px] leading-snug text-red-700">
+                      {job.errorMessage?.trim() || 'This job failed without a message. Check the server logs.'}
+                    </p>
+                  )}
                 </li>
               ))}
             </ul>
@@ -265,9 +304,9 @@ function DocumentRow({
         >
           Download
         </button>
-        {document.status === 'failed' && (
+        {(document.status === 'failed' || (document.status === 'extracted' && document.extractionError)) && (
           <button type="button" className="text-brand-700 hover:underline" onClick={() => onReextract(document)}>
-            Retry extraction
+            {document.kind === 'template' ? 'Re-analyse' : 'Retry extraction'}
           </button>
         )}
         <button type="button" className="text-ink-500 hover:text-red-600" onClick={() => onDelete(document)}>

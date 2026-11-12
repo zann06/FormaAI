@@ -10,6 +10,7 @@
 import {
   cloneNode,
   createParagraph,
+  createTable,
   escapeXml,
   findAll,
   findChild,
@@ -25,6 +26,12 @@ import { readDocxPackage, writeDocxPackage, xmlToString, stringToXml, type DocxP
 import { analyzeDocumentXml, extractPlaceholders, partText } from './analyze.js';
 import type { FidelityReport, InsertionStrategy } from '@formaai/shared';
 
+export interface AssemblyTable {
+  columns: string[];
+  rows: string[][];
+  caption?: string | null;
+}
+
 export interface AssemblySection {
   sectionId: string;
   headingText: string;
@@ -33,6 +40,14 @@ export interface AssemblySection {
   insertionStrategy: InsertionStrategy;
   placeholder?: string | null;
   content: string;
+  /**
+   * A table to emit after the section's prose.
+   *
+   * Tables are structural, not text: a Markdown pipe table in `content` would be
+   * flattened into identical paragraphs. The generator returns the cells and
+   * this assembler writes a real <w:tbl> so Word/LibreOffice can style it.
+   */
+  table?: AssemblyTable | null;
   /** Skip content insertion (e.g. user excluded the section). */
   skip?: boolean;
 }
@@ -49,6 +64,8 @@ export interface AssembleResult {
   buffer: Uint8Array;
   fidelity: FidelityReport;
   insertedParagraphs: number;
+  /** Word tables written from generated cells. */
+  insertedTables: number;
   replacedPlaceholders: number;
   unresolvedPlaceholders: string[];
 }
@@ -209,6 +226,7 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
 
   let replacedPlaceholders = 0;
   let insertedParagraphs = 0;
+  let tablesInserted = 0;
 
   // 1. Global placeholder replacements (e.g. {{report_title}}, {{date}})
   if (options.globalPlaceholders) {
@@ -231,9 +249,19 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
     const headingPara = findHeadingParagraph(body, section);
     if (!headingPara) continue;
     const paragraphs = buildContentParagraphs(content, headingPara);
-    if (paragraphs.length === 0) continue;
-    insertAfter(body, headingPara, paragraphs);
-    insertedParagraphs += paragraphs.length;
+    if (paragraphs.length > 0) {
+      insertAfter(body, headingPara, paragraphs);
+      insertedParagraphs += paragraphs.length;
+    }
+    // A table goes after the prose it introduces, as a real Word table.
+    if (section.table && section.table.columns.length > 0) {
+      const tableNodes = createTable(section.table);
+      const anchor = paragraphs.length > 0 ? paragraphs[paragraphs.length - 1]! : headingPara;
+      insertAfter(body, anchor, tableNodes);
+      insertedParagraphs += 1;
+      tablesInserted += 1;
+    }
+    if (paragraphs.length === 0 && !section.table) continue;
   }
 
   const outputXml = serializeXml([root]);
@@ -263,8 +291,15 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
       `Heading count changed from ${originalStructure.headings.length} to ${outputStructure.headings.length}. Check the template's custom styles.`,
     );
   }
-  const tablesOk = outputStructure.tableCount === originalStructure.tableCount;
-  if (!tablesOk) warnings.push('Table count differs from the template.');
+  // Tables we wrote are additions, not drift: the template's own tables must all
+  // still be present, plus exactly the ones generated for this report.
+  const expectedTables = originalStructure.tableCount + tablesInserted;
+  const tablesOk = outputStructure.tableCount === expectedTables;
+  if (!tablesOk) {
+    warnings.push(
+      `Table count is ${outputStructure.tableCount}, expected ${expectedTables} (${originalStructure.tableCount} from the template plus ${tablesInserted} generated).`,
+    );
+  }
 
   const unresolved = extractPlaceholders(reopenedXml.replace(/<[^>]+>/g, '')).filter(
     (key) => !/^w:|^xml/.test(key),
@@ -293,7 +328,14 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
   };
 
   void mediaParts;
-  return { buffer: outputBuffer, fidelity, insertedParagraphs, replacedPlaceholders, unresolvedPlaceholders: unresolved };
+  return {
+    buffer: outputBuffer,
+    fidelity,
+    insertedParagraphs,
+    insertedTables: tablesInserted,
+    replacedPlaceholders,
+    unresolvedPlaceholders: unresolved,
+  };
 }
 
 export { escapeXml, unescapeXml, findAll, paragraphStyleId };

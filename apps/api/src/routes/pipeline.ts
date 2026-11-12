@@ -1,11 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { sql } from 'drizzle-orm';
-import { generateAllSchema, jobListQuerySchema, sectionRegenerateSchema, sectionUpdateSchema } from '@formaai/shared';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import {
+  generateAllSchema,
+  jobListQuerySchema,
+  sectionRegenerateSchema,
+  sectionUpdateSchema,
+} from '@formaai/shared';
 import type { ServerContext } from '../server-context.js';
 import { parseBody, parseParams, parseQuery, requireUser } from '../plugins/auth-helpers.js';
 import { JobService } from '../services/jobs/index.js';
 import { conflict, notFound } from '../lib/errors.js';
+import { processingJobs } from '../db/schema.js';
 
 const projectParams = z.object({ projectId: z.string().uuid() });
 const sectionParams = z.object({ projectId: z.string().uuid(), sectionId: z.string().uuid() });
@@ -13,6 +19,61 @@ const jobParams = z.object({ projectId: z.string().uuid(), jobId: z.string().uui
 
 export async function registerPipelineRoutes(instance: FastifyInstance, ctx: ServerContext): Promise<void> {
   const jobs = new JobService(ctx.db, ctx.config.JOB_MAX_ATTEMPTS);
+
+  // ---- one-click pipeline --------------------------------------------------
+  /**
+   * Analyses the template, maps evidence and drafts every section in one job.
+   * This is what the "Scan & generate" button calls, so the user does not have
+   * to trigger three separate steps and watch three separate progress bars.
+   */
+  instance.post('/api/projects/:projectId/pipeline', async (request, reply) => {
+    const user = requireUser(request);
+    const { projectId } = parseParams(request, projectParams);
+    const body = parseBody(
+      request,
+      z.object({
+        useAi: z.boolean().optional().default(true),
+        providerCredentialId: z.string().uuid().optional(),
+        exportFormats: z.array(z.enum(['docx', 'pdf'])).max(2).optional(),
+        regenerateExisting: z.boolean().optional().default(false),
+      }),
+    );
+
+    // One pipeline at a time per project: two concurrent runs would fight over
+    // the same report sections and produce duplicated AI spend.
+    const [active] = await ctx.db
+      .select({ id: processingJobs.id })
+      .from(processingJobs)
+      .where(
+        and(
+          eq(processingJobs.projectId, projectId),
+          eq(processingJobs.kind, 'run_pipeline'),
+          inArray(processingJobs.status, ['queued', 'running']),
+        ),
+      )
+      .limit(1);
+    if (active) {
+      throw conflict('A scan is already running for this project. Wait for it to finish.');
+    }
+
+    // Drafting needs a model. Refuse before queueing so the user gets one clear
+    // instruction instead of a job that runs for minutes and then fails.
+    if (body.useAi) {
+      await ctx.credentialService.assertHasProvider(user);
+    }
+
+    const job = await jobs.enqueue(user, {
+      projectId,
+      kind: 'run_pipeline',
+      payload: {
+        useAi: body.useAi,
+        providerCredentialId: body.providerCredentialId,
+        exportFormats: body.exportFormats,
+        regenerateExisting: body.regenerateExisting,
+      },
+    });
+    return reply.status(202).send({ jobId: job.id });
+  });
 
   // ---- evidence mapping ---------------------------------------------------
   instance.get('/api/projects/:projectId/mapping', async (request, reply) => {
@@ -33,6 +94,9 @@ export async function registerPipelineRoutes(instance: FastifyInstance, ctx: Ser
       request,
       z.object({ useAi: z.boolean().optional().default(true), providerCredentialId: z.string().uuid().optional() }),
     );
+    // Reject the request now if it cannot possibly succeed; a queued job would
+    // fail asynchronously and be retried for no reason.
+    await ctx.mappingService.assertCanMap(user, projectId);
     const job = await jobs.enqueue(user, {
       projectId,
       kind: 'map_evidence',

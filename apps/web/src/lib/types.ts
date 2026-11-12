@@ -57,6 +57,8 @@ export interface OutlineSection {
   headingOriginal?: string;
   level: number;
   sortOrder: number;
+  /** Word style of the heading paragraph; "Title" marks the document's own title. */
+  styleId?: string | null;
   required: boolean;
   excluded: boolean;
   insertionStrategy: 'placeholder' | 'after_heading' | 'manual';

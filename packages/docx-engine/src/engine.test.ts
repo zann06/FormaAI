@@ -92,6 +92,80 @@ describe('template analysis', () => {
   it('handles placeholders split across runs', () => {
     expect(extractPlaceholders('a {{foo}} b {{ bar }}')).toEqual(['foo', 'bar']);
   });
+
+  /**
+   * Campus/school templates routinely ignore Word heading styles and just use
+   * bold, centred, larger text with manual chapter numbering.
+   */
+  it('infers headings from formatting and numbering when no heading styles exist', () => {
+    const pkg = readDocxPackage(
+      buildFixtureDocx({
+        body: [
+          { text: 'LAPORAN KERJA PRAKTIK', bold: true, fontSize: 32, align: 'center' },
+          { text: 'BAB I PENDAHULUAN', bold: true, fontSize: 28, align: 'center', pageBreakBefore: true },
+          { text: '1.1 Latar Belakang', bold: true, fontSize: 24 },
+          { text: 'Perusahaan ini bergerak di bidang teknologi informasi sejak tahun 1998.' },
+          { text: '1.2 Tujuan', bold: true, fontSize: 24 },
+          { text: 'BAB II PEMBAHASAN', bold: true, fontSize: 28, align: 'center' },
+          { text: 'Kegiatan berjalan sesuai rencana.' },
+        ],
+      }),
+    );
+    const structure = analyzeDocumentXml(
+      xmlToString(pkg.files['word/document.xml']!),
+      xmlToString(pkg.files['word/styles.xml']!),
+      null,
+    );
+    expect(structure.headings.map((h) => h.text)).toEqual([
+      'LAPORAN KERJA PRAKTIK',
+      'BAB I PENDAHULUAN',
+      '1.1 Latar Belakang',
+      '1.2 Tujuan',
+      'BAB II PEMBAHASAN',
+    ]);
+    expect(structure.headings.map((h) => h.level)).toEqual([1, 1, 2, 2, 1]);
+    expect(structure.warnings.join(' ')).toContain('inferred from formatting');
+  });
+
+  it('does not promote body prose, list items or table-of-contents lines', () => {
+    const pkg = readDocxPackage(
+      buildFixtureDocx({
+        body: [
+          { text: 'PENDAHULUAN', bold: true, fontSize: 28, align: 'center' },
+          { text: 'Perusahaan ini bergerak di bidang teknologi informasi sejak tahun 1998 dan terus berkembang pesat.' },
+          { text: 'PENDAHULUAN ......... 1', bold: true, fontSize: 28 },
+          { text: '1. Dokumentasi', bold: true, numberingLevel: 0 },
+          { text: 'Kegiatan ini berjalan lancar tanpa kendala berarti.' },
+        ],
+      }),
+    );
+    const structure = analyzeDocumentXml(
+      xmlToString(pkg.files['word/document.xml']!),
+      xmlToString(pkg.files['word/styles.xml']!),
+      null,
+    );
+    expect(structure.headings.map((h) => h.text)).toEqual(['PENDAHULUAN']);
+  });
+
+  it('recognises localised heading style names without an outline level', () => {
+    const pkg = readDocxPackage(
+      buildFixtureDocx({
+        customStyles: [{ id: 'JudulSatu', name: 'Judul 1' }],
+        body: [
+          { text: 'Bab Pendahuluan', styleId: 'JudulSatu' },
+          { text: 'Isi bagian pendahuluan.' },
+          { text: 'Bagian Penutup', styleId: 'JudulSatu' },
+        ],
+      }),
+    );
+    const structure = analyzeDocumentXml(
+      xmlToString(pkg.files['word/document.xml']!),
+      xmlToString(pkg.files['word/styles.xml']!),
+      null,
+    );
+    expect(structure.headings.map((h) => h.text)).toEqual(['Bab Pendahuluan', 'Bagian Penutup']);
+    expect(structure.headings.every((h) => h.level === 1)).toBe(true);
+  });
 });
 
 describe('assembly fidelity', () => {
@@ -196,3 +270,125 @@ describe('assembly fidelity', () => {
     expect(() => readDocxPackage(new TextEncoder().encode('hello world'))).toThrow(/not a readable ZIP/);
   });
 });
+
+/**
+ * "Gambar & tabel tidak masuk" was reported by the user. The export already kept
+ * the template's own tables and images byte-for-byte, so the missing piece was
+ * generated ones: a section about an addressing plan was answered with three
+ * paragraphs describing a table. These tests pin the fix — generated cells
+ * become a real <w:tbl>, never Markdown pipes inside a paragraph.
+ */
+describe('generated tables', () => {
+  it('writes a real Word table and reports it as inserted', () => {
+    const template = complexTemplate();
+    const before = readDocxPackage(template);
+    const beforeStructure = analyzeDocumentXml(
+      xmlToString(before.files['word/document.xml']!),
+      xmlToString(before.files['word/styles.xml']!),
+      null,
+    );
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Tabel berikut merangkum alokasi pengalamatan IP.',
+          table: {
+            caption: 'Tabel 2.3 Alokasi Pengalamatan IP',
+            columns: ['Perangkat', 'Alamat IP', 'Gateway'],
+            rows: [
+              ['Router', '192.168.10.98', '192.168.10.1'],
+              ['Server DHCP', '192.168.10.2', '192.168.10.1'],
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(result.insertedTables).toBe(1);
+    // The template's own tables must survive *and* the fidelity check must accept
+    // the addition instead of reporting drift.
+    expect(result.fidelity.outputTables).toBe(beforeStructure.tableCount + 1);
+    expect(result.fidelity.warnings.join(' ')).not.toContain('Table count');
+    expect(result.fidelity.passed).toBe(true);
+
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    const [root] = parseXml(docXml);
+    const body = findChild(root!, 'w:body')!;
+    const tables = findAll(body, 'w:tbl');
+    // `paragraphText` collects every w:t below the node, so search on the table.
+    const generated = tables.find((t) => paragraphText(t).includes('192.168.10.98'))!;
+    expect(generated).toBeDefined();
+
+    // Every cell is its own <w:tc>, so Word renders columns, not one run of text.
+    const rows = findAll(generated, 'w:tr');
+    expect(rows).toHaveLength(3); // header + 2 body rows
+    expect(findAll(rows[0]!, 'w:tc').map(paragraphText)).toEqual(['Perangkat', 'Alamat IP', 'Gateway']);
+    expect(findAll(rows[1]!, 'w:tc').map(paragraphText)).toEqual(['Router', '192.168.10.98', '192.168.10.1']);
+    expect(docXml).toContain('Tabel 2.3 Alokasi Pengalamatan IP');
+  });
+
+  it('never writes Markdown pipes into the document', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Berikut alokasinya.',
+          table: { columns: ['A', 'B'], rows: [['x', 'y']] },
+        },
+      ],
+    });
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    expect(docXml).not.toMatch(/\|\s*-{3,}/);
+    expect(docXml).not.toContain('| A | B |');
+  });
+
+  it('pads short rows to the header width so cells do not shift', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Ringkasan.',
+          table: { columns: ['A', 'B', 'C'], rows: [['only-one-cell']] },
+        },
+      ],
+    });
+    const [root] = parseXml(xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!));
+    const tables = findAll(findChild(root!, 'w:body')!, 'w:tbl');
+    const generated = tables.find((t) => paragraphText(t).includes('only-one-cell'))!;
+    const bodyRow = findAll(generated, 'w:tr')[1]!;
+    expect(findAll(bodyRow, 'w:tc')).toHaveLength(3);
+  });
+
+  it('does not disturb the section prose when a table is present', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Kalimat pengantar sebelum tabel.',
+          table: { columns: ['A'], rows: [['1']] },
+        },
+      ],
+    });
+    const [root] = parseXml(xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!));
+    const items = bodyItems(root!);
+    const headingIdx = items.findIndex((i) => i.kind === 'paragraph' && paragraphText(i.node) === 'Chapter 1a Background');
+    // lead-in paragraph first, then the table
+    expect(items[headingIdx + 1]!.kind).toBe('paragraph');
+    expect(paragraphText(items[headingIdx + 1]!.node)).toBe('Kalimat pengantar sebelum tabel.');
+    expect(items[headingIdx + 2]!.kind).toBe('table');
+  });
+});
+

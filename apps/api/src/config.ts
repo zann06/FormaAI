@@ -56,7 +56,10 @@ export const envSchema = z.object({
   ENABLE_DEV_PROVIDER: booleanish.default(false),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).default(90_000),
   AI_MAX_EVIDENCE_CHARS: z.coerce.number().int().min(1000).default(14_000),
-  AI_MAX_SECTIONS_PER_JOB: z.coerce.number().int().min(1).default(40),
+  // Bounds the cost of one job. A real campus template routinely has 40-70
+  // sections, and the old default of 40 silently cut off the tail of every
+  // report larger than that, so the default now clears a typical full report.
+  AI_MAX_SECTIONS_PER_JOB: z.coerce.number().int().min(1).default(120),
   AI_STRUCTURED_REPAIR_ATTEMPTS: z.coerce.number().int().min(0).max(3).default(1),
 
   WORKER_ENABLED: booleanish.default(true),

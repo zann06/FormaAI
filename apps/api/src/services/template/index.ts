@@ -123,13 +123,30 @@ export class TemplateService {
           extractedAt: new Date(),
           pageCount: result.structure.pageSetup ? result.structure.sectionBreakCount : null,
           metadata: { structure: result.structure },
-          extractionError: null,
+          // A template with zero sections is not an error in the parser; it is a
+          // real, common authoring problem. Record it where the user will see it,
+          // instead of leaving them with a silently empty outline.
+          extractionError:
+            result.sections.length === 0
+              ? 'No sections could be detected. FormaAI looked for Word heading styles, outline levels, chapter numbering (BAB I, 1.1, ...) and heading-like formatting (bold, larger or centred short paragraphs). If the document has none of these, add sections manually from the outline, or re-upload a version whose chapter titles use Heading 1 / Heading 2.'
+              : null,
           updatedAt: new Date(),
         })
         .where(and(eq(documents.id, documentId), eq(documents.userId, ctx.userId)));
       await tx
         .update(projects)
-        .set({ templateReady: result.sections.length > 0, updatedAt: new Date(), lastActivityAt: new Date() })
+        .set({
+          templateReady: result.sections.length > 0,
+          // The upload set status to "processing". Analysis is the step that ends
+          // that wait, so clear it here — otherwise a template that yields no
+          // headings (or a re-analysis that changes nothing) leaves the project
+          // stuck on "Processing" forever, with no job left running. Only a
+          // "processing" project is moved; a report already in review or ready
+          // keeps its status.
+          status: sql`case when ${projects.status} = 'processing' then 'draft' else ${projects.status} end`,
+          updatedAt: new Date(),
+          lastActivityAt: new Date(),
+        })
         .where(and(eq(projects.id, projectId), eq(projects.userId, ctx.userId)));
     });
 
@@ -223,6 +240,7 @@ export class TemplateService {
         headingOriginal: templateSections.headingOriginal,
         level: templateSections.level,
         sortOrder: templateSections.sortOrder,
+        styleId: templateSections.styleId,
         required: templateSections.required,
         excluded: templateSections.excluded,
         insertionStrategy: templateSections.insertionStrategy,

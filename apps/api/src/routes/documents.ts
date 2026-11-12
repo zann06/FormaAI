@@ -3,8 +3,9 @@ import { z } from 'zod';
 import type { ServerContext } from '../server-context.js';
 import { parseParams, requireUser } from '../plugins/auth-helpers.js';
 import { AppError, badRequest, notFound, validationError } from '../lib/errors.js';
+import { expandArchive } from '../lib/archive.js';
 import { JobService } from '../services/jobs/index.js';
-import { SOURCE_EXTENSIONS } from '@formaai/shared';
+import { MIME_BY_EXTENSION, SOURCE_EXTENSIONS, extensionOf, isArchiveSourceExtension } from '@formaai/shared';
 
 const projectParams = z.object({ projectId: z.string().uuid() });
 const documentParams = z.object({ projectId: z.string().uuid(), documentId: z.string().uuid() });
@@ -24,6 +25,52 @@ export async function registerDocumentRoutes(instance: FastifyInstance, ctx: Ser
     const { projectId } = parseParams(request, projectParams);
     const file = await readUpload(request, instance, ctx);
     const kind = file.kind;
+
+    // A ZIP is a container, not evidence. Unpack it and upload each supported
+    // file inside it, so a student's "Dokumen Kasus.zip" works as-is.
+    if (kind === 'source' && isArchiveSourceExtension(extensionOfPart(file.filename))) {
+      const expansion = await expandArchive(file.buffer);
+      const uploaded: Array<{ document: ReturnType<typeof toDocumentResponse>; jobId: string }> = [];
+      const failed: Array<{ name: string; reason: string }> = [];
+      for (const entry of expansion.entries) {
+        try {
+          const doc = await documents.upload(
+            user,
+            projectId,
+            { filename: entry.name, mimetype: archiveEntryMime(entry.name), buffer: entry.bytes },
+            'source',
+          );
+          const job = await jobs.enqueue(user, {
+            projectId,
+            kind: 'extract_document',
+            payload: { documentId: doc.id },
+            documentId: doc.id,
+          });
+          uploaded.push({ document: toDocumentResponse(doc), jobId: job.id });
+        } catch (error) {
+          failed.push({ name: entry.path, reason: errorMessageOf(error) });
+        }
+      }
+      if (uploaded.length === 0) {
+        throw badRequest(
+          `None of the files in "${file.filename}" could be added: ${failed
+            .slice(0, 3)
+            .map((entry) => `${entry.name} (${entry.reason})`)
+            .join('; ')}`,
+        );
+      }
+      return reply.status(201).send({
+        document: uploaded[0]!.document,
+        jobId: uploaded[0]!.jobId,
+        archive: {
+          name: file.filename,
+          added: uploaded.length,
+          documents: uploaded.map((entry) => entry.document),
+          skipped: [...expansion.skipped, ...failed.map((entry) => ({ path: entry.name, reason: entry.reason }))],
+        },
+      });
+    }
+
     const doc = await documents.upload(user, projectId, file, kind);
     const job = await jobs.enqueue(user, {
       projectId,
@@ -76,22 +123,36 @@ async function readUpload(
   if (!request.isMultipart()) {
     throw badRequest('Upload the file as multipart/form-data with a "file" field');
   }
-  const part = await request.file();
-  if (!part) throw badRequest('No file was provided');
-  const kindField = part.fields?.kind;
+  // Every text field lands in `request.body` regardless of where it appears in the
+  // multipart stream (see `attachFieldsToBody` in the multipart registration).
+  // Relying on `part.fields` instead meant a "kind" sent after the file was dropped
+  // and the upload silently became a "source" — which is how a .docx template from
+  // the chat was stored as plain evidence, leaving the project with no outline and a
+  // disabled "Scan & generate" button.
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const filePart = body.file as
+    | { filename?: string; mimetype?: string; toBuffer?: () => Promise<Buffer> }
+    | undefined;
+  if (!filePart || typeof filePart.toBuffer !== 'function') {
+    throw badRequest('Upload the file as multipart/form-data with a "file" field');
+  }
+  const filename = filePart.filename ?? 'upload';
+  const mimetype = filePart.mimetype ?? 'application/octet-stream';
+  const buffer = await filePart.toBuffer();
+
+  const rawKind = fieldValue(body, 'kind');
   let kind: 'template' | 'source' = 'source';
-  if (kindField && 'value' in kindField && typeof kindField.value === 'string') {
-    if (kindField.value !== 'template' && kindField.value !== 'source') {
+  if (rawKind !== undefined && rawKind !== null && rawKind !== '') {
+    if (rawKind !== 'template' && rawKind !== 'source') {
       throw badRequest('The "kind" field must be "template" or "source"');
     }
-    kind = kindField.value;
+    kind = rawKind;
   }
-  const buffer = await part.toBuffer();
   if (buffer.byteLength > ctx.config.MAX_FILE_MB * 1024 * 1024) {
     throw new AppError('PAYLOAD_TOO_LARGE', `File exceeds the ${ctx.config.MAX_FILE_MB} MB limit`);
   }
   if (kind === 'source') {
-    const ext = part.filename.toLowerCase().slice(part.filename.lastIndexOf('.'));
+    const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'));
     if (!SOURCE_EXTENSIONS.includes(ext as (typeof SOURCE_EXTENSIONS)[number])) {
       throw new AppError(
         'UNSUPPORTED_MEDIA_TYPE',
@@ -100,7 +161,19 @@ async function readUpload(
     }
   }
   void instance;
-  return { filename: part.filename, mimetype: part.mimetype, buffer: new Uint8Array(buffer), kind };
+  return { filename, mimetype, buffer: new Uint8Array(buffer), kind };
+}
+
+/** Reads a multipart text field whether it arrived as a string or a value object. */
+function fieldValue(fields: Record<string, unknown>, name: string): string | undefined {
+  const field = fields[name] as { value?: unknown } | undefined;
+  if (!field) return undefined;
+  if (typeof field === 'string') return field;
+  const value = field.value;
+  if (typeof value === 'string') return value;
+  // `attachFieldsToBody` may hand back a Buffer for a plain text field.
+  if (value && typeof value === 'object' && 'toString' in value) return String(value);
+  return undefined;
 }
 
 function toDocumentResponse(doc: Record<string, unknown>) {
@@ -117,3 +190,26 @@ function toDocumentResponse(doc: Record<string, unknown>) {
 
 void validationError;
 void notFound;
+
+/** Extension of an uploaded part's filename, lowercased (``.zip``). */
+function extensionOfPart(filename: string): string {
+  const index = filename.lastIndexOf('.');
+  return index === -1 ? '' : filename.slice(index).toLowerCase();
+}
+
+/**
+ * Declared MIME type for a file pulled out of an archive. It only has to be
+ * *plausible* for the extension: validateUpload re-checks the real bytes.
+ */
+function archiveEntryMime(name: string): string {
+  const candidates = MIME_BY_EXTENSION[extensionOf(name)];
+  return candidates?.[0] ?? 'application/octet-stream';
+}
+
+function errorMessageOf(error: unknown): string {
+  if (error instanceof AppError) return error.message;
+  if (error instanceof Error) return error.message;
+  return 'unknown error';
+}
+
+void extensionOf;

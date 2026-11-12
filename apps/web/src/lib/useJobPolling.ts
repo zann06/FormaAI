@@ -10,7 +10,15 @@ import { api } from '../lib/api';
  */
 export interface JobLike {
   id: string;
+  /** Job kind, e.g. `map_evidence` or `generate_section`. */
+  kind?: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  stage?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt?: string;
+  finishedAt?: string | null;
+  result?: Record<string, unknown>;
 }
 
 export function useJobPolling(projectId: string | undefined, onJobs: (jobs: JobLike[]) => void, enabled: boolean) {

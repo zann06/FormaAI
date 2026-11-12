@@ -24,6 +24,14 @@ export interface RetrievalQuery {
 export interface RetrievalOptions {
   topK?: number;
   minScore?: number;
+  /**
+   * Chunks every section may fall back to when its heading shares no words with
+   * the sources. Supplying these turns "no lexical overlap" into "best available
+   * topical evidence" instead of an empty section.
+   */
+  fallback?: EvidenceChunk[];
+  /** How many fallback chunks a section may receive. */
+  fallbackK?: number;
 }
 
 /**
@@ -31,13 +39,21 @@ export interface RetrievalOptions {
  * query built from the section heading, its template body preview, and user
  * instructions. AI re-ranking (when configured) happens in the mapping service;
  * this pure function is the part that always runs and is unit tested.
+ *
+ * Headings in real templates are structural — "BAB I PENDAHULUAN", "1.1 Latar
+ * Belakang", "2.1 Pembahasan" — and those words appear nowhere in a case
+ * document that talks about switches and latency. BM25 then scores exactly 0 and
+ * the section was mapped to nothing, so drafting produced "[MISSING: no source
+ * material]" even though the sources were full of relevant material. When a
+ * heading has no lexical overlap at all we therefore fall back to the project's
+ * most on-topic chunks, at a reduced score so the UI can tell the two apart.
  */
 export function rankEvidence(
   query: RetrievalQuery,
   chunks: EvidenceChunk[],
   options: RetrievalOptions = {},
 ): Array<{ chunk: EvidenceChunk; score: number }> {
-  const { topK = 8, minScore = 0.15 } = options;
+  const { topK = 8, minScore = 0.15, fallback = [], fallbackK = 3 } = options;
   const queryText = [query.heading, query.heading, query.purpose ?? '', query.instructions ?? '', query.bodyPreview ?? '']
     .filter(Boolean)
     .join(' ');
@@ -49,9 +65,49 @@ export function rankEvidence(
     chunks.map((chunk) => ({ item: chunk, text: `${chunk.headingPath ?? ''} ${chunk.text}` })),
     { limit: topK },
   );
-  return ranked
+  const matched = ranked
     .filter((entry) => entry.score >= minScore)
     .map((entry) => ({ chunk: entry.item, score: entry.score }));
+
+  if (matched.length > 0 || fallback.length === 0) return matched;
+
+  // No keyword overlap: rank the fallback pool by how much of the heading it
+  // covers, keeping a document-order tiebreak so the result stays deterministic.
+  const scoredFallback = bm25Rank(
+    queryText,
+    fallback.map((chunk) => ({ item: chunk, text: `${chunk.headingPath ?? ''} ${chunk.text}` })),
+  );
+  const pool = scoredFallback.some((entry) => entry.score > 0)
+    ? scoredFallback.filter((entry) => entry.score > 0)
+    : fallback.map((chunk) => ({ item: chunk, score: 0 }));
+  return pool
+    .slice(0, fallbackK)
+    .map((entry) => ({ chunk: entry.item, score: Math.max(entry.score, 0.01) }));
+}
+
+/**
+ * Picks the chunks that represent the project as a whole — used as the topical
+ * fallback above. Prefers the opening of each source, where the subject of the
+ * document is stated, and stays within a small character budget.
+ */
+export function buildTopicPool(chunks: EvidenceChunk[], options: { maxChunks?: number } = {}): EvidenceChunk[] {
+  const { maxChunks = 8 } = options;
+  const byDocument = new Map<string, EvidenceChunk[]>();
+  for (const chunk of chunks) {
+    const list = byDocument.get(chunk.documentId) ?? [];
+    list.push(chunk);
+    byDocument.set(chunk.documentId, list);
+  }
+  const picks: EvidenceChunk[] = [];
+  for (const list of byDocument.values()) {
+    const ordered = [...list].sort((a, b) => a.ordinal - b.ordinal);
+    picks.push(...ordered.slice(0, 3));
+  }
+  // Longest chunks carry the most context; keep the pool small and stable.
+  return picks
+    .sort((a, b) => b.text.length - a.text.length || a.ordinal - b.ordinal)
+    .slice(0, maxChunks)
+    .sort((a, b) => a.ordinal - b.ordinal);
 }
 
 export function coverageFromEvidence(evidenceCount: number, totalChars: number): 'strong' | 'partial' | 'none' {

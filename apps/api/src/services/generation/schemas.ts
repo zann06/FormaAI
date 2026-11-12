@@ -39,9 +39,19 @@ function tryParse(text: string): { ok: true; value: unknown } | { ok: false; err
   }
 }
 
+export const sectionTableZod = z
+  .object({
+    columns: z.array(z.string().max(200)).min(1).max(20),
+    rows: z.array(z.array(z.string().max(500)).max(20)).max(200),
+    caption: z.string().max(300).optional(),
+  })
+  .strict();
+
 export const sectionDraftZod = z
   .object({
     body: z.string().min(1, 'The section body is empty'),
+    // Optional: only present when the section is about a table.
+    table: sectionTableZod.nullish(),
     citedChunkIds: z.array(z.string()).max(200).default([]),
     warnings: z.array(z.string().max(1000)).max(30).default([]),
     placeholders: z.array(z.string().max(300)).max(30).default([]),

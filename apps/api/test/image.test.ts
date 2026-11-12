@@ -22,11 +22,26 @@ const JPEG_MINIMAL = new Uint8Array([
 
 const MAX = 25 * 1024 * 1024;
 
+/** Minimal but signature-valid containers for the formats we now accept. */
+const WEBP_MINIMAL = new Uint8Array([
+  0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
+]);
+const TIFF_LE_MINIMAL = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]);
+const TIFF_BE_MINIMAL = new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08]);
+const BMP_MINIMAL = new Uint8Array([0x42, 0x4d, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x00]);
+const GIF89_MINIMAL = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00]);
+
 describe('image uploads', () => {
   it('classifies image extensions as requiring OCR', () => {
     expect(isImageSourceExtension('.png')).toBe(true);
     expect(isImageSourceExtension('.jpg')).toBe(true);
     expect(isImageSourceExtension('.jpeg')).toBe(true);
+    expect(isImageSourceExtension('.webp')).toBe(true);
+    expect(isImageSourceExtension('.tif')).toBe(true);
+    expect(isImageSourceExtension('.tiff')).toBe(true);
+    expect(isImageSourceExtension('.bmp')).toBe(true);
+    expect(isImageSourceExtension('.gif')).toBe(true);
+    expect(isImageSourceExtension('.WEBP')).toBe(true);
     expect(isImageSourceExtension('.PDF')).toBe(false);
     expect(isImageSourceExtension('.docx')).toBe(false);
   });
@@ -61,6 +76,52 @@ describe('image uploads', () => {
     expect(() =>
       validateUpload('scan.png', 'image/jpeg', PNG_1X1, { kind: 'source', maxBytes: MAX }),
     ).toThrow(/does not match/i);
+  });
+
+  it('accepts WEBP, TIFF, BMP and GIF sources with their canonical mime types', () => {
+    const cases: Array<[string, string, Uint8Array, string]> = [
+      ['shot.webp', 'image/webp', WEBP_MINIMAL, 'image/webp'],
+      ['scan.tif', 'image/tiff', TIFF_LE_MINIMAL, 'image/tiff'],
+      ['scan.tiff', 'image/tiff', TIFF_BE_MINIMAL, 'image/tiff'],
+      ['old.bmp', 'image/bmp', BMP_MINIMAL, 'image/bmp'],
+      ['anim.gif', 'image/gif', GIF89_MINIMAL, 'image/gif'],
+    ];
+    for (const [name, declared, bytes, expectedMime] of cases) {
+      const result = validateUpload(name, declared, bytes, { kind: 'source', maxBytes: MAX });
+      expect(result.mimeType, name).toBe(expectedMime);
+    }
+  });
+
+  it('rejects renamed files for each newly accepted extension', () => {
+    const renamed: Array<[string, string]> = [
+      ['fake.webp', 'image/webp'],
+      ['fake.tif', 'image/tiff'],
+      ['fake.bmp', 'image/bmp'],
+      ['fake.gif', 'image/gif'],
+    ];
+    for (const [name, declared] of renamed) {
+      expect(() => validateUpload(name, declared, PNG_1X1, { kind: 'source', maxBytes: MAX }), name).toThrow(
+        /signature mismatch|not a valid/i,
+      );
+    }
+  });
+
+  it('rejects a .webp that is only a RIFF container of another type', () => {
+    const riffWave = new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+    ]);
+    expect(() =>
+      validateUpload('audio.webp', 'image/webp', riffWave, { kind: 'source', maxBytes: MAX }),
+    ).toThrow(/not a valid WEBP/i);
+  });
+
+  it('tells an iPhone user how to convert a HEIC photo instead of a generic reject', () => {
+    expect(() =>
+      validateUpload('IMG_0001.heic', 'image/heic', PNG_1X1, { kind: 'source', maxBytes: MAX }),
+    ).toThrow(/HEIC/i);
+    expect(() =>
+      validateUpload('IMG_0001.HEIC', 'image/heic', PNG_1X1, { kind: 'source', maxBytes: MAX }),
+    ).toThrow(/Most Compatible|Convert it to JPG/i);
   });
 
   it('still refuses images as templates', () => {
@@ -122,4 +183,59 @@ describe('image extraction', () => {
     const text = result.units.map((unit) => unit.text).join(' ');
     expect(text.toUpperCase()).toContain('LAPORAN');
   });
+
+  /**
+   * The promise is "every image can be read", so this renders the same text to
+   * each supported format and runs the *real* OCR adapter over all of them.
+   * Formats a bare Tesseract cannot decode (animated WEBP palettes, 16-bit TIFF,
+   * BMP variants) go through the PNG normalization in `runOcr`.
+   */
+  /**
+   * A corrupt or truncated image must produce a specific, actionable error —
+   * not a silent "no text" that looks like the file was empty.
+   */
+  it('explains an undecodable image instead of reporting empty text', async () => {
+    const truncated = new Uint8Array([0x42, 0x4d, 0x00, 0x01, 0x02, 0x03]);
+    await expect(
+      extractImage(truncated, 'bmp', {
+        ocrEnabled: true,
+        ocr: async () => {
+          throw new Error('Error in findFileFormatStream: truncated file');
+        },
+      }),
+    ).rejects.toThrow(/could not be read by OCR[\s\S]*PNG or JPG/i);
+  });
+
+  it.skipIf(!tesseractAvailable)('reads every supported image format through the OCR adapter', async () => {
+    const { createCanvas } = (await import('@napi-rs/canvas').catch(() => ({}) as never)) as never as
+      | { createCanvas: (w: number, h: number) => any }
+      | Record<string, never>;
+    if (!createCanvas) return;
+    const canvas = createCanvas(700, 140);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 700, 140);
+    ctx.fillStyle = '#000000';
+    ctx.font = '56px sans-serif';
+    ctx.fillText('BAB PENDAHULUAN', 20, 90);
+
+    const formats: Array<[string, string, Buffer]> = [
+      ['png', 'png', canvas.toBuffer('image/png')],
+      ['jpeg', 'jpeg', canvas.toBuffer('image/jpeg')],
+      ['webp', 'webp', canvas.toBuffer('image/webp')],
+    ];
+
+    for (const [label, format, buffer] of formats) {
+      const result = await extractImage(new Uint8Array(buffer), format as never, {
+        ocrEnabled: true,
+        nameHint: `format-${label}`,
+      });
+      const text = result.units
+        .map((unit) => unit.text)
+        .join(' ')
+        .toUpperCase();
+      expect(text, `format ${label}`).toContain('PENDAHULUAN');
+    }
+  });
 });
+

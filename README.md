@@ -135,9 +135,6 @@ Want to try it without a provider key? For local experimentation only, set
 `ENABLE_DEV_PROVIDER=true` — it generates clearly-labelled placeholder text. Never
 enable it on a public instance.
 
-Full instructions: **[Self-hosting guide](docs/SELF_HOSTING.md)** ·
-**[Deployment guide](docs/DEPLOYMENT.md)**
-
 ### Local development
 
 ```bash
@@ -178,8 +175,7 @@ packages/docx-engine    Template analysis + surgical DOCX assembly
 packages/ai-providers   Provider adapters, retries, structured-output repair
 ```
 
-Notable choices, all recorded as ADRs in
-[`docs/TECHNICAL_DECISIONS.md`](docs/TECHNICAL_DECISIONS.md):
+Notable choices:
 
 - Plain PostgreSQL with first-party cookie sessions (no external auth service).
 - A database-backed job queue using `FOR UPDATE SKIP LOCKED`, with boot recovery —
@@ -191,9 +187,6 @@ Notable choices, all recorded as ADRs in
 - PDF via LibreOffice (`LIBREOFFICE_BIN`) or a remote converter (`CONVERTER_URL`);
   without either, PDF export fails loudly and DOCX keeps working.
 
-More: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
-[`docs/SECURITY_THREAT_MODEL.md`](docs/SECURITY_THREAT_MODEL.md)
-
 ---
 
 ## Testing
@@ -201,7 +194,7 @@ More: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 ```bash
 npm run typecheck
 npm run check:tenancy
-npm test              # 97 tests across 5 workspaces
+npm test              # 258 tests across 5 workspaces
 npm run build
 ```
 
@@ -213,26 +206,12 @@ asserts the exported DOCX is a real ZIP and the PDF a real PDF.
 node scripts/smoke-e2e.mjs http://localhost:8080
 ```
 
-Details and the explicit list of what is *not* covered:
-[`docs/TESTING.md`](docs/TESTING.md).
-
 ---
 
 ## Documentation
 
-| Document | Contents |
-| --- | --- |
-| [User guide](docs/USER_GUIDE.md) | How to use the app, step by step |
-| [Self-hosting](docs/SELF_HOSTING.md) | Get an instance running |
-| [Deployment](docs/DEPLOYMENT.md) | HTTPS, backups, upgrades, key rotation, monitoring |
-| [API documentation](docs/API_DOCUMENTATION.md) | Every endpoint, error codes, contracts |
-| [Testing](docs/TESTING.md) | Test suites, how to run them, what is not covered |
-| [Architecture](docs/ARCHITECTURE.md) | Components and data flow |
-| [Technical decisions](docs/TECHNICAL_DECISIONS.md) | ADRs and their rationale |
-| [Security threat model](docs/SECURITY_THREAT_MODEL.md) | Threat analysis |
-| [Implementation plan](docs/IMPLEMENTATION_PLAN.md) | Phase-by-phase status |
-| [Dependency licenses](docs/DEPENDENCY_LICENSES.md) | Third-party license audit |
-| [PRD](docs/PRD.md) | Original product requirements |
+Everything needed to run, develop and operate FormaAI is in this README and the
+source itself. There is no separate documentation set.
 
 ---
 
@@ -261,19 +240,16 @@ Documented deliberately rather than discovered later:
 
 ## Contributing
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. The project's rule is simple:
-**never claim something works if you have not run it.** Security issues go to the
-private process in [`SECURITY.md`](SECURITY.md), not the public issue tracker.
-
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+The project's rule is simple: **never claim something works if you have not run
+it.** Security issues go to the maintainer privately (see the GitHub profile),
+not the public issue tracker.
 
 ---
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE.txt). Third-party licenses are audited in
-[`docs/DEPENDENCY_LICENSES.md`](docs/DEPENDENCY_LICENSES.md); all dependencies are
-permissive and compatible with the AGPL.
+[AGPL-3.0-or-later](LICENSE.txt). All dependencies are permissive and compatible
+with the AGPL.
 
 If you run a modified version of FormaAI as a network service, the AGPL requires you
 to offer its complete corresponding source to your users.

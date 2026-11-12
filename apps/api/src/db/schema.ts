@@ -263,6 +263,14 @@ export const reportSections = pgTable(
     citedChunkIds: jsonb('cited_chunk_ids').$type<string[]>().notNull().default([]),
     warnings: jsonb('warnings').$type<string[]>().notNull().default([]),
     placeholders: jsonb('placeholders').$type<string[]>().notNull().default([]),
+    /**
+     * A generated table for this section, when the heading asks for one.
+     *
+     * Stored apart from `content` because a table is structure, not prose: the
+     * exporter writes a real Word table from these cells instead of dumping
+     * pipes into a paragraph.
+     */
+    tableData: jsonb('table_data').$type<{ columns: string[]; rows: string[][]; caption?: string } | null>(),
     providerCredentialId: uuid('provider_credential_id'),
     modelUsed: varchar('model_used', { length: 160 }),
     generatedAt: timestamp('generated_at', { withTimezone: true }),

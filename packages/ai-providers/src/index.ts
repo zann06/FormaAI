@@ -9,6 +9,7 @@ import {
   type ConnectionTestResult,
   type ProviderAdapter,
   type ProviderConfig,
+  type UsageMetadata,
 } from './types.js';
 
 export * from './types.js';
@@ -61,8 +62,20 @@ export interface CompleteWithFallbackOptions {
   primary: ProviderConfig & { id: string };
   fallback?: (ProviderConfig & { id: string }) | null;
   request: CompletionRequest;
-  /** Called with the credential id actually used, for usage logging. */
-  onAttempt?: (credentialId: string, outcome: 'success' | 'failure', error?: ProviderError) => Promise<void> | void;
+  /**
+   * Called with the credential id actually used, for usage logging.
+   *
+   * On success the fourth argument carries the token counts the provider
+   * reported. They must be forwarded here: usage logging has no other way to see
+   * them, and dropping them made every request record 0 input / 0 output tokens
+   * even though the call had clearly produced a completion.
+   */
+  onAttempt?: (
+    credentialId: string,
+    outcome: 'success' | 'failure',
+    error?: ProviderError,
+    usage?: UsageMetadata,
+  ) => Promise<void> | void;
 }
 
 export interface CompleteWithFallbackResult {
@@ -84,7 +97,7 @@ export async function completeWithFallback(
   let firstError: ProviderError | undefined;
   try {
     const result = await withRetry(() => registry.get(primary.providerType).complete(primary, request));
-    await onAttempt?.(primary.id, 'success');
+    await onAttempt?.(primary.id, 'success', undefined, result.usage);
     return { result, usedCredentialId: primary.id, fellBack: false };
   } catch (error) {
     firstError = error instanceof ProviderError ? error : new ProviderError((error as Error).message, 'PROVIDER_ERROR');
@@ -93,7 +106,7 @@ export async function completeWithFallback(
   }
   try {
     const result = await withRetry(() => registry.get(fallback!.providerType).complete(fallback!, request));
-    await onAttempt?.(fallback!.id, 'success');
+    await onAttempt?.(fallback!.id, 'success', undefined, result.usage);
     return {
       result,
       usedCredentialId: fallback!.id,

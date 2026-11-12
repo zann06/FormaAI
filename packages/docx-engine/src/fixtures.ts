@@ -14,6 +14,10 @@ export interface FixtureParagraph {
   styleId?: string;
   bold?: boolean;
   italic?: boolean;
+  /** Font size in half-points (Word's unit), e.g. 32 = 16pt. */
+  fontSize?: number;
+  align?: 'left' | 'center' | 'right' | 'both';
+  numberingLevel?: number;
   /** Placeholder tokens are written as separate runs to emulate Word's run splitting. */
   splitRuns?: boolean;
   pageBreakBefore?: boolean;
@@ -40,6 +44,9 @@ const NS = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/mai
 function pPr(p: FixtureParagraph): string {
   const parts: string[] = [];
   if (p.styleId) parts.push(`<w:pStyle w:val="${p.styleId}"/>`);
+  if (p.numberingLevel !== undefined)
+    parts.push(`<w:numPr><w:ilvl w:val="${p.numberingLevel}"/><w:numId w:val="1"/></w:numPr>`);
+  if (p.align) parts.push(`<w:jc w:val="${p.align}"/>`);
   if (p.pageBreakBefore) parts.push('<w:pageBreakBefore/>');
   if (p.outlineLevel !== undefined) parts.push(`<w:outlineLvl w:val="${p.outlineLevel}"/>`);
   return parts.length ? `<w:pPr>${parts.join('')}</w:pPr>` : '';
@@ -49,6 +56,7 @@ function rPr(p: FixtureParagraph): string {
   const parts: string[] = [];
   if (p.bold) parts.push('<w:b/>');
   if (p.italic) parts.push('<w:i/>');
+  if (p.fontSize) parts.push(`<w:sz w:val="${p.fontSize}"/>`);
   return parts.length ? `<w:rPr>${parts.join('')}</w:rPr>` : '';
 }
 

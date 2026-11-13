@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errorMessage } from '../lib/api';
+import { Select } from './Select';
 
 /**
  * The Preview tab: real page images of the report as it will be exported.
@@ -27,7 +28,21 @@ export interface PreviewResponse {
   totalPages: number;
   truncated: boolean;
   renderedAt: string;
+  /** 1-based number of the first page in `pages`; >1 for a windowed render. */
+  firstPage?: number;
 }
+
+/**
+ * How many pages are fetched in the first request.
+ *
+ * Rendering the whole document took ~20 s (LibreOffice conversion plus ~0.3 s per
+ * page), so the user stared at "Rendering pages…" before seeing anything. Pages
+ * 1–6 include the cover and the start of chapter one, which is what you look at
+ * first, and they arrive in roughly half the time. The remaining pages are
+ * fetched immediately afterwards and appended, so the list fills in while the
+ * first page is already readable.
+ */
+const FIRST_BATCH = 6;
 
 export function PreviewPane({
   projectId,
@@ -55,37 +70,117 @@ export function PreviewPane({
   const [unavailable, setUnavailable] = useState(false);
   const [zoom, setZoom] = useState(100);
   const requestId = useRef(0);
+  /**
+   * True while a *background* refresh is in flight, i.e. one the user did not ask
+   * for. Kept separate from `loading` so the page list is never replaced by a
+   * "Rendering pages…" placeholder while typing: the previous pages stay on screen
+   * and only a small badge changes.
+   */
+  const [syncing, setSyncing] = useState(false);
 
-  const load = useCallback(async () => {
-    const id = ++requestId.current;
-    setLoading(true);
-    setError(null);
-    setUnavailable(false);
-    try {
-      const response = await api.get<PreviewResponse>(`/api/projects/${projectId}/preview`);
-      // Ignore a stale response if a newer request started meanwhile.
-      if (requestId.current !== id) return;
-      setPreview(response);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      const message = errorMessage(caught);
-      // 501 means the server has no renderer; that is a setup fact, not a bug.
-      if (/needs LibreOffice|preview needs/i.test(message)) setUnavailable(true);
-      setError(message);
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [projectId]);
+  const load = useCallback(
+    async (mode: 'manual' | 'auto' = 'manual') => {
+      const id = ++requestId.current;
+      // A manual refresh shows the loading placeholder; an automatic one only
+      // shows the small "updating" badge, so the pages already on screen stay put
+      // instead of flickering away every keystroke.
+      if (mode === 'auto') setSyncing(true);
+      else setLoading(true);
+      setError(null);
+      setUnavailable(false);
+      try {
+        // First batch: cover + opening pages, so something readable appears fast.
+        const first = await api.get<PreviewResponse>(
+          `/api/projects/${projectId}/preview?from=1&to=${FIRST_BATCH}`,
+        );
+        if (requestId.current !== id) return;
+        setPreview(first);
+        setLoading(false);
 
+        // The rest of the document, appended as it arrives. Skipped when the
+        // document is short or when the cap already covered it.
+        if (first.totalPages > FIRST_BATCH) {
+          setSyncing(true);
+          const rest = await api.get<PreviewResponse>(
+            `/api/projects/${projectId}/preview?from=${FIRST_BATCH + 1}&to=${first.totalPages}`,
+          );
+          if (requestId.current !== id) return;
+          setPreview((current) => {
+            if (!current) return rest;
+            const seen = new Set(current.pages.map((page) => page.page));
+            const merged = [...current.pages, ...rest.pages.filter((page) => !seen.has(page.page))].sort(
+              (a, b) => a.page - b.page,
+            );
+            return { ...rest, pages: merged, pageCount: merged.length };
+          });
+        }
+      } catch (caught) {
+        if (requestId.current !== id) return;
+        const message = errorMessage(caught);
+        // 501 means the server has no renderer; that is a setup fact, not a bug.
+        if (/needs LibreOffice|preview needs/i.test(message)) setUnavailable(true);
+        setError(message);
+      } finally {
+        if (requestId.current === id) {
+          setLoading(false);
+          setSyncing(false);
+        }
+      }
+    },
+    [projectId],
+  );
+
+  // First load, and a manual "Refresh" click.
   useEffect(() => {
-    void load();
-  }, [load, refreshToken]);
+    void load('manual');
+  }, [load]);
+
+  /**
+   * Re-render automatically after the report changes.
+   *
+   * The preview used to update only when the user pressed Refresh, so it was
+   * routine to look at a page, fix a section, and still be shown the old text. The
+   * debounce matters: `refreshToken` changes on every save, and rendering a 40-page
+   * document takes seconds, so firing per change would queue renders and hammer the
+   * server. 1200 ms is long enough to swallow a burst of edits and short enough to
+   * feel live.
+   */
+  const firstToken = useRef(true);
+  useEffect(() => {
+    if (firstToken.current) {
+      firstToken.current = false;
+      return;
+    }
+    const handle = window.setTimeout(() => void load('auto'), 1200);
+    return () => window.clearTimeout(handle);
+  }, [refreshToken, load]);
 
   return (
     <div className="flex h-full flex-col" data-testid="preview-pane">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-200 px-3 py-2">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-ink-900">Preview</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-ink-900">Preview</h2>
+            {(syncing || loading) && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-medium text-brand-700"
+                data-testid="preview-live"
+              >
+                <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" />
+                Updating…
+              </span>
+            )}
+            {!syncing && !loading && preview && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"
+                data-testid="preview-current"
+                title={`Rendered ${new Date(preview.renderedAt).toLocaleTimeString()}`}
+              >
+                <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Live
+              </span>
+            )}
+          </div>
           <p className="text-xs text-ink-500">
             {preview
               ? `Showing ${preview.pageCount} of ${preview.totalPages} page${preview.totalPages === 1 ? '' : 's'} — this is the exported file.`
@@ -93,31 +188,31 @@ export function PreviewPane({
           </p>
         </div>
         <div className="flex items-center gap-1.5">
-          <label className="flex items-center gap-1 text-xs text-ink-600">
-            <span className="sr-only">Zoom</span>
-            <select
-              value={zoom}
-              onChange={(event) => setZoom(Number(event.target.value))}
-              className="rounded border border-ink-300 px-1.5 py-1 text-xs"
-              data-testid="preview-zoom"
-            >
-              <option value={70}>70%</option>
-              <option value={85}>85%</option>
-              <option value={100}>100%</option>
-              <option value={130}>130%</option>
-            </select>
-          </label>
+          <Select
+            size="sm"
+            className="w-24"
+            aria-label="Zoom"
+            data-testid="preview-zoom"
+            value={String(zoom)}
+            onChange={(next) => setZoom(Number(next))}
+            options={[
+              { value: '70', label: '70%' },
+              { value: '85', label: '85%' },
+              { value: '100', label: '100%' },
+              { value: '130', label: '130%' },
+            ]}
+          />
           <button
             type="button"
-            className="btn-secondary text-xs"
-            onClick={() => void load()}
+            className="btn-secondary btn-sm"
+            onClick={() => void load('manual')}
             disabled={loading}
             data-testid="preview-refresh"
           >
             {loading ? 'Rendering…' : 'Refresh'}
           </button>
           {onDownload && (
-            <button type="button" className="btn-primary text-xs" onClick={onDownload}>
+            <button type="button" className="btn-primary btn-sm" onClick={onDownload}>
               Download
             </button>
           )}

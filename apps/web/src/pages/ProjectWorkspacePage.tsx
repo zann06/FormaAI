@@ -80,6 +80,23 @@ function latestJobOfKind(jobs: JobLike[], kind: string): JobLike | null {
   return jobs.find((job) => job.kind === kind) ?? null;
 }
 
+/**
+ * A cheap, stable digest of section text, used to detect edits.
+ *
+ * FNV-1a: 4 bytes of state, one pass over the string, and good enough to notice
+ * that text changed — which is all the preview token needs. Not a security hash,
+ * so collisions only cost a missed refresh, never correctness of the document.
+ */
+function hashContent(text: string): string {
+  if (text.length === 0) return '0';
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
 export function ProjectWorkspacePage() {
   const { projectId = '' } = useParams();
   const navigate = useNavigate();
@@ -383,15 +400,23 @@ export function ProjectWorkspacePage() {
         const deadline = Date.now() + 5 * 60 * 1000;
         while (Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          const job = await api.get<{ job: { status: string; errorMessage?: string | null } }>(
-            `/api/projects/${projectId}/jobs/${response.jobId}`,
-          );
+          const job = await api.get<{
+            job: {
+              status: string;
+              errorMessage?: string | null;
+              result?: { missingCoverFields?: string[]; warnings?: string[] };
+            };
+          }>(`/api/projects/${projectId}/jobs/${response.jobId}`);
           const status = job.job?.status;
           if (status !== 'succeeded' && status !== 'failed') continue;
           if (status === 'failed') {
             return { ok: false, message: job.job.errorMessage?.trim() || `The ${format.toUpperCase()} job failed.` };
           }
-          return { ok: true, message: `The ${format.toUpperCase()} file was built and saved.` };
+          return {
+            ok: true,
+            message: `The ${format.toUpperCase()} file was built and saved.`,
+            missingCoverFields: job.job.result?.missingCoverFields ?? [],
+          };
         }
         return { ok: false, message: `The ${format.toUpperCase()} export did not finish in time.` };
       } catch (error) {
@@ -508,9 +533,16 @@ export function ProjectWorkspacePage() {
 
   // Changing this re-fetches the preview. Derived from report content so an edit
   // or a new scan invalidates it, while a plain tab switch does not re-render.
+  //
+  // The section content is hashed rather than measured by length: a length-only
+  // token missed every edit that happened to keep the same character count — a
+  // corrected typo, a changed number, a swapped word — so the preview silently kept
+  // showing the old text for exactly the small fixes it is most useful for.
   const previewToken = useMemo(
     () =>
-      (reports ?? []).map((report) => `${report.sectionId}:${(report.content ?? '').length}`).join('|') +
+      (reports ?? [])
+        .map((report) => `${report.sectionId}:${hashContent(report.content ?? '')}`)
+        .join('|') +
       `#${latestScanJob?.id ?? ''}:${latestScanJob?.status ?? ''}:${latestScanJob?.finishedAt ?? ''}`,
     [reports, latestScanJob],
   );
@@ -728,6 +760,7 @@ export function ProjectWorkspacePage() {
             total: totalSections,
             emptyHeadings,
             headings: (outline ?? []).map((section) => section.heading),
+            instructions: project?.instructions ?? null,
             busy,
             pdfAvailable,
             exportReady: (exports ?? []).some((entry) => entry.status === 'ready'),

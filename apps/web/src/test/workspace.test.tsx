@@ -505,8 +505,73 @@ describe('ProjectWorkspacePage', () => {
       expect(await screen.findByAltText(/Page 2 of the exported report/i)).toBeInTheDocument();
     });
 
-    it('tells the user when only the first pages are shown', async () => {
-      installFetchMock(
+    /**
+     * The preview used to update only on Refresh, so it was routine to fix a
+     * section and still be shown the old page. It now re-renders by itself after a
+     * short debounce — this pins that, including the part that matters most: an
+     * edit that keeps the same character count must still refresh.
+     */
+    it('re-renders automatically after an edit, even one that keeps the same length', async () => {
+      let previewCalls = 0;
+      const { calls } = installFetchMock(
+        baseRoutes({
+          // The save has to succeed for the refresh to be triggered at all; without
+          // this route the PATCH 404s and the test would be asserting on a path the
+          // user never reaches.
+          [`PATCH /api/projects/${projectId}/sections/${sectionId}/content`]: () => ({
+            json: {
+              section: {
+                id: sectionId,
+                content: 'The quarter was productivf.',
+                status: 'draft',
+                revision: 2,
+                wordCount: 4,
+                updatedAt: null,
+              },
+            },
+          }),
+          [`GET /api/projects/${projectId}/preview`]: () => {
+            previewCalls += 1;
+            return {
+              json: {
+                pages: [{ page: 1, width: 1240, height: 1754, image: png }],
+                pageCount: 1,
+                totalPages: 1,
+                truncated: false,
+                renderedAt: new Date().toISOString(),
+              },
+            };
+          },
+        }),
+      );
+      renderWorkspace();
+      await screen.findByRole('heading', { name: 'Q3 Report' });
+      await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+      await screen.findByAltText(/Page 1 of the exported report/i);
+
+      const initial = previewCalls;
+      expect(initial).toBeGreaterThan(0);
+
+      // Edit the section body with a same-length change ("productive." -> "productivf.").
+      // The section editor lives in the Outline drawer, so open it first; a test
+      // that silently returns when the editor is missing proves nothing, so every
+      // step here is asserted.
+      await userEvent.click(screen.getByTestId('chat-open-outline'));
+      await userEvent.click(await screen.findByRole('button', { name: 'Open section Introduction' }));
+      const editor = (await screen.findByLabelText('Section content')) as HTMLTextAreaElement;
+      await waitFor(() => expect(editor.value).toBe('The quarter was productive.'));
+
+      await userEvent.clear(editor);
+      await userEvent.type(editor, 'The quarter was productivf.');
+      const editorPane = screen.getByLabelText('Section editor');
+      await userEvent.click(within(editorPane).getByRole('button', { name: 'Save' }));
+
+      // The debounce is 1200 ms; allow for the save round trip on top.
+      await waitFor(() => expect(previewCalls).toBeGreaterThan(initial), { timeout: 8000 });
+      expect(calls.some((call) => call.path.includes('/preview'))).toBe(true);
+    });
+
+    it('tells the user when only the first pages are shown', async () => {      installFetchMock(
         baseRoutes({
           [`GET /api/projects/${projectId}/preview`]: () => ({
             json: {
@@ -707,13 +772,17 @@ describe('ProjectWorkspacePage', () => {
       await userEvent.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
-      // It says what it understood before acting.
-      expect(steps).toHaveTextContent(/understood as/i);
+      // A question is ANSWERED from the project's real state, so the trail carries the
+      // facts behind the answer rather than "understood as …" for a command.
       // It reports the real state of this project: 1 section, 1 written.
       expect(steps).toHaveTextContent(/Template read: 1 section/i);
       expect(steps).toHaveTextContent(/1 of 1 sections have content/i);
       // And it names the configured model it will use.
       expect(steps).toHaveTextContent(/gpt-4o-mini/i);
+      // The answer itself is not empty and refers to the report's state.
+      expect(within(chat).getByTestId('chat-answer')).toHaveTextContent(
+        /sections (have|has) content|Nothing is empty/i,
+      );
     });
 
     it('reports empty sections by heading when the report is not finished', async () => {
@@ -842,6 +911,71 @@ describe('ProjectWorkspacePage', () => {
       });
       const steps = await within(chat).findByTestId('chat-steps');
       await waitFor(() => expect(steps).toHaveTextContent(/DOCX file was built and saved/i), { timeout: 6000 });
+    });
+
+    /**
+     * Test 6: the file was produced but the cover still said
+     * "[ Tuliskan Nama Lengkap Anda ]". The assistant must ask for the missing
+     * details itself instead of silently handing over a blank cover.
+     */
+    it('asks for the cover details when the exported file still has them blank', async () => {
+      installFetchMock(
+        baseRoutes({
+          [`POST /api/projects/${projectId}/exports`]: () => ({ status: 202, json: { jobId: 'job-cover', exportId: 'exp-cover' } }),
+          [`GET /api/projects/${projectId}/jobs/job-cover`]: () => ({
+            json: {
+              job: {
+                id: 'job-cover',
+                status: 'succeeded',
+                stage: 'done',
+                progress: 100,
+                errorMessage: null,
+                result: { missingCoverFields: ['Nama', 'NIM', 'Kelas', 'Tanggal'] },
+              },
+            },
+          }),
+        }),
+      );
+      renderWorkspace();
+      await screen.findByRole('heading', { name: 'Q3 Report' });
+
+      const chat = await screen.findByTestId('chat-panel');
+      await userEvent.type(within(chat).getByTestId('chat-input'), 'export the docx');
+      await userEvent.click(within(chat).getByTestId('chat-send'));
+
+      const answer = await within(chat).findByTestId('chat-answer', {}, { timeout: 8000 });
+      await waitFor(() => expect(answer).toHaveTextContent(/still blank on the cover/i), { timeout: 8000 });
+      expect(answer).toHaveTextContent(/Nama/);
+      expect(answer).toHaveTextContent(/NIM/);
+      const steps = await within(chat).findByTestId('chat-steps');
+      expect(steps).toHaveTextContent(/Cover still blank/i);
+    });
+
+    /**
+     * A message that supplies identity used to be stored verbatim, so the export
+     * parser read "Farid, NIM: 124140210" as the name and never saw the other
+     * fields. Canonical lines are what `identityReplacements()` understands.
+     */
+    it('stores cover details as canonical lines the export can read', async () => {
+      const { calls } = installFetchMock(baseRoutes());
+      renderWorkspace();
+      await screen.findByRole('heading', { name: 'Q3 Report' });
+
+      const chat = await screen.findByTestId('chat-panel');
+      await userEvent.type(
+        within(chat).getByTestId('chat-input'),
+        'Nama: Farid Rizky Fauzan, NIM: 124140210, Kelas: RA',
+      );
+      await userEvent.click(within(chat).getByTestId('chat-send'));
+
+      await waitFor(() => {
+        const patch = calls.find((call) => call.method === 'PATCH' && call.path === `/api/projects/${projectId}`);
+        expect(patch?.body).toEqual({
+          instructions: 'Nama: Farid Rizky Fauzan\nNIM: 124140210\nKelas: RA',
+        });
+      });
+      const steps = await within(chat).findByTestId('chat-steps');
+      expect(steps).toHaveTextContent(/Saved for the cover/i);
     });
 
     it('surfaces the server reason when the export is blocked', async () => {

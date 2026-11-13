@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { planChatAction, summariseSteps } from '../lib/chat-actions';
+import { extractIdentity, mergeIdentity, planChatAction, planChatSteps, summariseSteps } from '../lib/chat-actions';
 
 /**
  * The chat is the primary surface of the workspace, so what a message *does* is
@@ -113,6 +113,56 @@ describe('planChatAction', () => {
   });
 });
 
+describe('identity captured from chat', () => {
+  const context = { headings: ['BAB I PENDAHULUAN'] };
+
+  it('reads the cover details out of an ordinary sentence', () => {
+    // The real message: these details never reached the server, so the exported
+    // cover kept showing "[ Tuliskan Nama Lengkap Anda ]".
+    const action = planChatAction('nama saya Farid Rizky Fauzan, NIM 124140210, kelas RA', context);
+    expect(action.kind).toBe('identity');
+    expect(action.identity).toEqual({ nama: 'Farid Rizky Fauzan', nim: '124140210', kelas: 'RA' });
+  });
+
+  it('accepts labelled form as well', () => {
+    const action = planChatAction('Nama: Farid Rizky Fauzan\nNIM: 124140210\nKelas: RA', context);
+    expect(action.kind).toBe('identity');
+    expect(action.identity?.nama).toBe('Farid Rizky Fauzan');
+    expect(action.identity?.nim).toBe('124140210');
+    expect(action.identity?.kelas).toBe('RA');
+  });
+
+  it('does not mistake a class label for the name', () => {
+    const fields = extractIdentity('nim 124140210');
+    expect(fields.nama).toBeUndefined();
+    expect(fields.nim).toBe('124140210');
+  });
+
+  it('keeps a name that contains a dot and an apostrophe', () => {
+    expect(extractIdentity("nama saya M. Yusuf Ma'ruf, kelas RB").nama).toBe("M. Yusuf Ma'ruf");
+  });
+
+  it('captures a submission date when one is given', () => {
+    expect(extractIdentity('tanggal pengumpulan 20 November 2026').tanggal).toBe('20 November 2026');
+  });
+
+  it('rejects a "class" that swallowed half the sentence', () => {
+    // "kelas RA dan NIM ..." must not keep the trailing words as the class.
+    const fields = extractIdentity('nama Farid kelas RA');
+    expect(fields.kelas).toBe('RA');
+  });
+
+  it('leaves an ordinary instruction alone', () => {
+    const action = planChatAction('pakai bahasa Indonesia formal', context);
+    expect(action.kind).toBe('instruction');
+    expect(action.identity).toBeUndefined();
+  });
+
+  it('still treats a generate request as work, not identity', () => {
+    expect(planChatAction('buatkan laporan', context).kind).toBe('generate-all');
+  });
+});
+
 describe('summariseSteps', () => {
   it('keeps every step message and marks skipped and failed ones differently', () => {
     const lines = summariseSteps('Finished.', [
@@ -138,5 +188,96 @@ describe('summariseSteps', () => {
 
   it('returns nothing when there is nothing to report', () => {
     expect(summariseSteps('', [])).toEqual([]);
+  });
+});
+
+/**
+ * The chat must behave like an agent: a message that asks for two things does both,
+ * and a question gets an answer instead of being silently stored as an instruction.
+ */
+describe('planChatSteps', () => {
+  const context = {
+    headings: [
+      'BAB I: PENDAHULUAN',
+      '2.3 Tabel Alokasi Pengalamatan IP Lengkap',
+      '3.2 Konfigurasi Switch dan Access Point Nirkabel',
+    ],
+  };
+
+  it('regenerates and then exports when both are asked for', () => {
+    const steps = planChatSteps('perbaiki laporan ini lalu export PDF', context);
+    expect(steps).toHaveLength(2);
+    expect(steps[0]!.kind).toBe('generate-all');
+    expect(steps[1]!.kind).toBe('export-pdf');
+  });
+
+  it('regenerates only the named section before exporting', () => {
+    const steps = planChatSteps('regenerate 2.3 lalu unduh docx', context);
+    expect(steps).toHaveLength(2);
+    expect(steps[0]!.kind).toBe('generate-section');
+    expect(steps[0]!.target).toContain('Tabel Alokasi');
+    expect(steps[1]!.kind).toBe('export-docx');
+  });
+
+  it('does not run work for a pure question', () => {
+    // A question is answered in prose; running a 44-section regeneration on it would
+    // be answering something the user never asked.
+    expect(planChatSteps('apa yang masih kosong?', context)).toEqual([]);
+    expect(planChatSteps('how many sections are unfinished?', context)).toEqual([]);
+  });
+
+  it('still performs explicit work that happens to end in a question mark', () => {
+    const steps = planChatSteps('bisakah kamu export pdf?', context);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.kind).toBe('export-pdf');
+  });
+
+  it('keeps single-command messages as one step', () => {
+    expect(planChatSteps('buatkan laporan', context)).toHaveLength(1);
+    expect(planChatSteps('generate', context)[0]!.kind).toBe('generate-all');
+  });
+
+  it('saves cover details as one step', () => {
+    const steps = planChatSteps('Nama: Farid Rizky Fauzan, NIM: 124140210, Kelas: RA', context);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.kind).toBe('identity');
+  });
+
+  /**
+   * The reported cover stayed blank because "Nama: … export" chose the export and
+   * dropped the data on the floor. Identity is a step of the job, not decoration.
+   */
+  it('saves cover details before exporting when one message carries both', () => {
+    const steps = planChatSteps('Nama: Farid, NIM: 124140210, Kelas: RA, lalu export DOCX', context);
+    expect(steps.map((step) => step.kind)).toEqual(['identity', 'export-docx']);
+    expect(steps[0]!.identity).toEqual({ nama: 'Farid', nim: '124140210', kelas: 'RA' });
+  });
+
+  it('saves cover details, drafts, then exports in that order', () => {
+    const steps = planChatSteps('Nama: Farid, NIM: 124140210. buatkan laporan lalu export pdf', context);
+    expect(steps.map((step) => step.kind)).toEqual(['identity', 'generate-all', 'export-pdf']);
+  });
+});
+
+describe('mergeIdentity', () => {
+  it('keeps standing guidance while adding the cover fields', () => {
+    const merged = mergeIdentity('pakai bahasa Indonesia formal', { nama: 'Farid', nim: '124140210' });
+    expect(merged).toBe('pakai bahasa Indonesia formal\nNama: Farid\nNIM: 124140210');
+  });
+
+  it('updates only the fields the user supplied', () => {
+    const merged = mergeIdentity('Nama: Farid\nNIM: 124140210\nKelas: RA', { kelas: 'RB' });
+    expect(merged).toContain('Nama: Farid');
+    expect(merged).toContain('NIM: 124140210');
+    expect(merged).toContain('Kelas: RB');
+    expect(merged).not.toContain('Kelas: RA');
+  });
+
+  it('accepts the aliases a template or user may write', () => {
+    const merged = mergeIdentity('Name: Farid\nClass: RA\nDate: 20 November 2026', { nama: 'Farid Rizky' });
+    expect(merged).toContain('Nama: Farid Rizky');
+    expect(merged).toContain('Kelas: RA');
+    expect(merged).toContain('Tanggal: 20 November 2026');
+    expect(merged).not.toContain('Name:');
   });
 });

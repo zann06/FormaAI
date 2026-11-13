@@ -370,7 +370,17 @@ export function analyzeDocumentXml(
   const patterned = formatCandidates.filter((candidate) => candidate.level > 0);
   const patternless = formatCandidates.filter((candidate) => candidate.level === 0);
   let acceptedFormat = [...patterned, ...patternless];
-  const maxPatternless = Math.max(3, Math.floor(features.length * 0.4));
+  // The cap is a share of *short, heading-like* paragraphs, not of every paragraph.
+  //
+  // It used to be a share of all paragraphs, which made detection depend on how
+  // much body text the document happened to contain: the same template yielded 44
+  // headings on its own but only 8 once generated prose was inserted, because 117
+  // new paragraphs raised the denominator. Export re-runs this analyser to verify
+  // fidelity, so that drift looked like 36 headings had been destroyed and blocked
+  // the PDF. Measuring against plausible headings keeps the guard's intent (do not
+  // promote half the document) while making the result independent of body length.
+  const shortParagraphs = features.filter((feature) => looksLikeHeadingText(feature.text)).length;
+  const maxPatternless = Math.max(3, Math.floor(shortParagraphs * 0.4));
   if (patternless.length > maxPatternless) {
     const ranked = [...patternless].sort((a, b) => b.score - a.score).slice(0, maxPatternless);
     const keep = new Set(ranked.map((candidate) => candidate.itemIndex));

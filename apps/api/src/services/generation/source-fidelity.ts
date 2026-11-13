@@ -150,10 +150,20 @@ export function stripOcrAnnotations(body: string): { body: string; changed: bool
  * A submitted assignment should not silently contain a command that does not
  * exist, and a bare word would hide the doubt. The wording is deliberately
  * readable by a human marker so it is actionable, not cryptic.
+ *
+ * It is short on purpose: the long form `[sic? verify against source]` is 30
+ * characters, and a real report repeated it 52 times because one misread command
+ * appeared in many sentences. At that density it stopped reading as a caution and
+ * became noise that buried the prose. `[sic?]` says the same thing in 7 characters;
+ * the full explanation is carried once per section as a warning.
  */
-export const UNCERTAIN_MARKER = '[sic? verify against source]';
+export const UNCERTAIN_MARKER = '[sic?]';
 
-export function markSuspiciousInBody(body: string, evidenceText: string): { body: string; tokens: string[] } {
+export function markSuspiciousInBody(
+  body: string,
+  evidenceText: string,
+  options: { firstOnly?: boolean } = {},
+): { body: string; tokens: string[] } {
   const tokens = findSuspiciousTokens(evidenceText).map((found) => found.token);
   let result = body;
   const marked: string[] = [];
@@ -161,9 +171,11 @@ export function markSuspiciousInBody(body: string, evidenceText: string): { body
     const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Skip a token that is already marked, so running the scrub twice (a retry, a
     // regenerate over an already-marked body) cannot mark it a second time.
-    const unfixed = `\\b${escaped}\\b(?! \\[sic\\? verify)`;
+    // Accept both the current and the legacy long marker so old drafts stay safe.
+    const unfixed = `\\b${escaped}\\b(?!\\s*\\[sic\\?)`;
+    const flags = options.firstOnly ? '' : 'g';
     if (!new RegExp(unfixed).test(result)) continue;
-    result = result.replace(new RegExp(unfixed, 'g'), `${token} ${UNCERTAIN_MARKER}`);
+    result = result.replace(new RegExp(unfixed, flags), `${token} ${UNCERTAIN_MARKER}`);
     marked.push(token);
   }
   return { body: result, tokens: marked };

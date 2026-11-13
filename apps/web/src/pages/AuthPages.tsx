@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useSession } from '../lib/session';
 import { errorMessage } from '../lib/api';
+import { Logo } from '../components/Logo';
 
 export function SignInPage() {
   const { user, loading, signIn, registrationEnabled } = useSession();
@@ -198,17 +199,18 @@ function AuthShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-full items-center justify-center px-4 py-12">
-      <div className="w-full max-w-sm">
-        <Link to="/" className="mb-8 flex items-center justify-center gap-2 text-lg font-semibold text-ink-900">
-          <span className="flex h-8 w-8 items-center justify-center rounded-md bg-brand-600 text-sm font-bold text-white">
-            F
-          </span>
-          FormaAI
-        </Link>
-        <div className="card p-6">
+    <div className="relative flex min-h-full items-center justify-center overflow-hidden px-4 py-12">
+      {/* A soft brand wash behind the card, so auth does not feel like a dead end. */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-brand-glow opacity-40" />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-1 bg-brand-line"
+      />
+      <div className="relative w-full max-w-sm animate-fade-up">
+        <Logo to="/" size={34} className="mb-8 justify-center" />
+        <div className="card p-6 shadow-lift">
           <h1 className="text-xl font-semibold text-ink-900">{title}</h1>
-          <p className="mt-1 mb-6 text-sm text-ink-600">{subtitle}</p>
+          <p className="mb-6 mt-1 text-sm text-ink-600">{subtitle}</p>
           {children}
         </div>
       </div>

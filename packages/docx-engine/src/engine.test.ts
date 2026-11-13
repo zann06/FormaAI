@@ -556,4 +556,205 @@ describe('source figures', () => {
   });
 });
 
+describe('figure relationships', () => {
+  it('registers a relationship for every figure, not just the last one', () => {
+    // The real defect: each figure rewrote document.xml.rels from a stale string,
+    // so a report with 25 pictures shipped ONE valid relationship and 24 dangling
+    // ones. Word calls that a corrupt file; LibreOffice silently renders the
+    // pictures as nothing, which is why a 44-page preview showed 2 images while the
+    // DOCX "looked fine" when inspected. Every r:embed must resolve.
+    const figures = Array.from({ length: 5 }, (_, i) => ({
+      bytes: tinyPng(),
+      extension: 'png' as const,
+      altText: `figure ${i + 1}`,
+    }));
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Topologi jaringan.',
+          figures,
+        },
+      ],
+    });
+    expect(result.insertedImages).toBe(5);
+
+    const pkg = readDocxPackage(result.buffer);
+    const rels = xmlToString(pkg.files['word/_rels/document.xml.rels']!);
+    const docXml = xmlToString(pkg.files['word/document.xml']!);
+
+    // Every drawing must point at a relationship that actually exists. The fixture
+    // template already ships one picture, so count the figure ids specifically.
+    const embeds = [...docXml.matchAll(/r:embed="([^"]+)"/g)].map((m) => m[1]!);
+    const figureIds = embeds.filter((id) => id.startsWith('rIdFig'));
+    expect(figureIds).toHaveLength(5);
+    for (const id of embeds) {
+      expect(rels).toContain(`Id="${id}"`);
+    }
+
+    // …and every relationship must point at a part that is really in the package.
+    for (const target of [...rels.matchAll(/Target="(media\/[^"]+)"/g)].map((m) => m[1]!)) {
+      expect(pkg.files[`word/${target}`]).toBeDefined();
+    }
+
+    // No relationship id may be reused, or a picture would show the wrong image.
+    expect(new Set(embeds).size).toBe(embeds.length);
+  });
+
+  it('keeps the relationships the template already had', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Topologi jaringan.',
+          figures: [{ bytes: tinyPng(), extension: 'png' }],
+        },
+      ],
+    });
+    const pkg = readDocxPackage(result.buffer);
+    const rels = xmlToString(pkg.files['word/_rels/document.xml.rels']!);
+    const docXml = xmlToString(pkg.files['word/document.xml']!);
+    // The template's own logo relationship (rId8 in the fixture) must survive.
+    for (const id of [...docXml.matchAll(/r:embed="(rId\d+)"/g)].map((m) => m[1]!)) {
+      expect(rels).toContain(`Id="${id}"`);
+    }
+  });
+});
+
+/**
+ * Headings in real campus templates carry NO heading style and no outline level —
+ * they are simply bold, larger, dark-blue runs. `buildContentParagraphs` derives
+ * body formatting from the heading's run properties, and it used to do so through a
+ * LIVE reference, filtering `<w:b/>`, `<w:sz/>` and `<w:color/>` off the heading
+ * itself. Every section that got generated prose therefore silently demoted its own
+ * heading to plain text.
+ *
+ * The damage was twofold: the document looked wrong (headings indistinguishable from
+ * body), and the fidelity check compares detected heading counts — those headings
+ * are detected *from* formatting, so the export failed with "Heading count changed
+ * from 44 to 8", which blocked the PDF entirely.
+ */
+describe('heading formatting survives content insertion', () => {
+  /** A template whose headings are bold runs, not styles — like the real ones. */
+  function runFormattedTemplate(): Uint8Array {
+    return buildFixtureDocx({
+      title: 'Run formatted headings',
+      body: [
+        { text: 'BAB I: PENDAHULUAN', bold: true, fontSize: 28, align: 'center' },
+        { text: 'Latar belakang laporan.' },
+        { text: '1.1 Latar Belakang', bold: true, fontSize: 24 },
+        { text: 'Isi asli bagian pertama.' },
+        { text: 'BAB II: PEMBAHASAN', bold: true, fontSize: 28, align: 'center' },
+        { text: 'Isi asli bagian kedua.' },
+      ],
+    });
+  }
+
+  /** The raw `<w:p>` XML for a paragraph whose text matches. */
+  function paragraphXmlFor(docXml: string, text: string): string {
+    const index = docXml.indexOf(text);
+    expect(index).toBeGreaterThan(-1);
+    const start = Math.max(docXml.lastIndexOf('<w:p>', index), docXml.lastIndexOf('<w:p ', index));
+    return docXml.slice(start, docXml.indexOf('</w:p>', index) + 6);
+  }
+
+  it('keeps bold, size and colour on a heading that receives generated prose', () => {
+    const template = runFormattedTemplate();
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: '1.1 Latar Belakang',
+          paragraphIndex: 3,
+          insertionStrategy: 'after_heading',
+          content: 'Paragraf hasil generate untuk subbab ini.',
+        },
+      ],
+    });
+
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    const heading = paragraphXmlFor(docXml, '1.1 Latar Belakang');
+    // The heading itself must still be bold and 12pt.
+    expect(heading).toContain('<w:b/>');
+    expect(heading).toContain('<w:sz w:val="24"/>');
+
+    // The generated body paragraph must NOT be bold — body text has to look like body.
+    const body = paragraphXmlFor(docXml, 'Paragraf hasil generate untuk subbab ini.');
+    expect(body).not.toContain('<w:b/>');
+    expect(body).not.toContain('<w:sz w:val="24"/>');
+  });
+
+  it('keeps every heading when many sections are generated', () => {
+    const template = runFormattedTemplate();
+    const before = readDocxPackage(template);
+    const beforeHeadings = analyzeDocumentXml(
+      xmlToString(before.files['word/document.xml']!),
+      xmlToString(before.files['word/styles.xml']!),
+      null,
+    ).headings.length;
+    expect(beforeHeadings).toBeGreaterThan(0);
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-a',
+          headingText: 'BAB I: PENDAHULUAN',
+          paragraphIndex: 1,
+          insertionStrategy: 'after_heading',
+          content: 'Paragraf pembuka bab satu.',
+        },
+        {
+          sectionId: 'sec-b',
+          headingText: '1.1 Latar Belakang',
+          paragraphIndex: 3,
+          insertionStrategy: 'after_heading',
+          content: 'Paragraf pembuka subbab.',
+        },
+        {
+          sectionId: 'sec-c',
+          headingText: 'BAB II: PEMBAHASAN',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Paragraf pembuka bab dua.',
+        },
+      ],
+    });
+
+    // This is the exact assertion the real export failed: heading detection is
+    // format-based, so stripping bold made 3 of 3 headings vanish.
+    expect(result.fidelity.outputHeadings).toBe(result.fidelity.templateHeadings);
+    expect(result.fidelity.warnings.join(' ')).not.toContain('Heading count');
+    expect(result.fidelity.passed).toBe(true);
+  });
+
+  it('does not let generated prose inherit the heading alignment', () => {
+    // A centred heading is common (titles); paragraphs under it must keep their own
+    // layout rather than being centred one by one.
+    const template = runFormattedTemplate();
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-title',
+          headingText: 'BAB I: PENDAHULUAN',
+          paragraphIndex: 1,
+          insertionStrategy: 'after_heading',
+          content: 'Baris pertama.\n\nBaris kedua setelah jeda.',
+        },
+      ],
+    });
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    // Both generated paragraphs exist and none of them carries the heading's runs.
+    expect(docXml).toContain('Baris pertama.');
+    expect(docXml).toContain('Baris kedua setelah jeda.');
+    const first = paragraphXmlFor(docXml, 'Baris pertama.');
+    expect(first).not.toContain('<w:b/>');
+  });
+});
+
 

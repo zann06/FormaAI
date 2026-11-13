@@ -124,24 +124,48 @@ describe('markSuspiciousInBody', () => {
     const result = markSuspiciousInBody(body, evidence);
     expect(result.tokens).toEqual(['apconfig']);
     // The token stays readable but is visibly not certain.
-    expect(result.body).toContain('apconfig [sic? verify against source]');
-    expect(result.body).not.toMatch(/\bapconfig\b(?! \[sic\? verify)/);
+    expect(result.body).toContain('apconfig [sic?]');
+    expect(result.body).not.toMatch(/\bapconfig\b(?!\s*\[sic\?)/);
   });
 
-  it('marks every occurrence, not only the first', () => {
+  /**
+   * The long marker `[sic? verify against source]` is 30 characters. A real report
+   * repeated it 52 times because one misread command appeared in many sentences,
+   * which buried the prose it was meant to annotate. The marker is now short, and
+   * callers that want a single annotation per section pass `firstOnly`.
+   */
+  it('marks every occurrence by default', () => {
     const body = 'Perintah apconfig /all lalu apconfig /all lagi.';
     const result = markSuspiciousInBody(body, evidence);
-    expect(result.body.match(/\[sic\? verify against source\]/g)).toHaveLength(2);
+    expect(result.body.match(/\[sic\?\]/g)).toHaveLength(2);
+  });
+
+  it('can mark only the first occurrence of each token', () => {
+    // This is what generation uses: one marker per doubtful token per section.
+    const body = 'Perintah apconfig /all lalu apconfig /all lagi.';
+    const result = markSuspiciousInBody(body, evidence, { firstOnly: true });
+    expect(result.body.match(/\[sic\?\]/g)).toHaveLength(1);
+    expect(result.body).toContain('apconfig [sic?] /all lalu apconfig /all lagi.');
+    // The token is still reported, so the section-level warning is unaffected.
+    expect(result.tokens).toEqual(['apconfig']);
   });
 
   it('does not mark a body that is already marked a second time', () => {
     // A retry or a regenerate can run the scrub over its own output; marking
-    // twice would produce "[sic? verify against source] [sic? verify against source]".
+    // twice would produce "[sic?] [sic?]".
     const once = markSuspiciousInBody('Perintah apconfig /all dijalankan.', evidence);
     const twice = markSuspiciousInBody(once.body, evidence);
     expect(twice.tokens).toEqual([]);
     expect(twice.body).toBe(once.body);
     expect(twice.body.match(/\[sic\?/g)).toHaveLength(1);
+  });
+
+  it('still recognises the legacy long marker and does not re-mark it', () => {
+    // Drafts saved before the marker was shortened must not gain a second marker.
+    const legacy = 'Perintah apconfig [sic? verify against source] /all.';
+    const result = markSuspiciousInBody(legacy, evidence);
+    expect(result.tokens).toEqual([]);
+    expect(result.body).toBe(legacy);
   });
 
   it('leaves a body untouched when the evidence raised no doubt', () => {
@@ -180,9 +204,9 @@ describe('markSuspiciousInTable', () => {
     };
     const result = markSuspiciousInTable(table, evidence);
     expect(result.tokens).toEqual(['apconfig']);
-    expect(result.table!.caption).toContain('apconfig [sic? verify against source]');
+    expect(result.table!.caption).toContain('apconfig [sic?]');
     expect(result.table!.columns[0]).toBe('Perintah');
-    expect(result.table!.rows[0]![0]).toBe('apconfig [sic? verify against source] /all');
+    expect(result.table!.rows[0]![0]).toBe('apconfig [sic?] /all');
   });
 
   it("marks a cell that states the misread as a fact", () => {
@@ -192,7 +216,7 @@ describe('markSuspiciousInTable', () => {
       rows: [['Perintah pada Command Line PC terbaca apconfig, bukan ipconfig, sehingga keluaran tidak dapat diverifikasi.']],
     };
     const result = markSuspiciousInTable(table, evidence);
-    expect(result.table!.rows[0]![0]).toContain('terbaca apconfig [sic? verify against source], bukan ipconfig');
+    expect(result.table!.rows[0]![0]).toContain('terbaca apconfig [sic?], bukan ipconfig');
   });
 
   it('leaves a clean table byte-identical', () => {

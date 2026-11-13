@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isPlaceholderOnly } from '../src/services/export/index.js';
+import { identityReplacements, isPlaceholderOnly, missingCoverFields } from '../src/services/export/index.js';
 
 /**
  * Export refuses to build a document with genuinely empty required sections.
@@ -37,5 +37,37 @@ describe('isPlaceholderOnly', () => {
 
   it('is case-insensitive', () => {
     expect(isPlaceholderOnly('[missing: something]')).toBe(true);
+  });
+});
+
+/**
+ * Test 6 shipped with `[ Tuliskan Nama Lengkap Anda ]` still on the cover because
+ * the project had no instructions and nothing ever asked for them. The check below
+ * is what lets the export job tell the chat which details are missing.
+ */
+describe('missingCoverFields', () => {
+  const blankCover =
+    'LAPORAN TUGAS\n[ Tuliskan Nama Lengkap Anda ]\n[ Tuliskan NIM Anda ]\n[ RA / RB / RC / RD ]\n[ Tuliskan Tanggal Pengumpulan ]';
+
+  it('names every prompt still present in the assembled document', () => {
+    expect(missingCoverFields(blankCover)).toEqual(['Nama', 'NIM', 'Kelas', 'Tanggal']);
+  });
+
+  it('reports only the fields that were not replaced', () => {
+    const partly = blankCover
+      .replace('[ Tuliskan Nama Lengkap Anda ]', 'Farid Rizky Fauzan')
+      .replace('[ Tuliskan NIM Anda ]', '124140210');
+    expect(missingCoverFields(partly)).toEqual(['Kelas', 'Tanggal']);
+  });
+
+  it('says nothing when the cover is complete', () => {
+    expect(missingCoverFields('Farid Rizky Fauzan\n124140210\nRA\n20 November 2026')).toEqual([]);
+  });
+
+  it('replaces the same prompts the detector looks for', () => {
+    const replacements = identityReplacements('Nama: Farid\nNIM: 124140210\nKelas: RA\nTanggal: 20 November 2026');
+    let filled = blankCover;
+    for (const { find, replace } of replacements) filled = filled.replace(find, replace);
+    expect(missingCoverFields(filled)).toEqual([]);
   });
 });

@@ -23,9 +23,11 @@ import {
   containsMarkdownHeadings,
   detectInstructionLeakage,
   extractClaimTokens,
+  looksLikeSerialisedSection,
   numbersSupportedBy,
   parseModelJson,
   sectionDraftZod,
+  unwrapJsonBody,
 } from './schemas.js';
 import {
   countWords,
@@ -350,13 +352,88 @@ export class GenerationService {
       parsed = sectionDraftZod.safeParse(safeParseJson(repaired.result.text));
       completion = { ...repaired, fellBack: completion.fellBack || repaired.fellBack };
       if (!parsed.success) {
-        throw new AppError('PROVIDER_ERROR', 'The model did not return a valid section payload after a repair attempt.');
+        // Last resort: ask for PLAIN PROSE, not JSON.
+        //
+        // Structure is a convenience; a written section is the product. Abandoning a
+        // section because the model would not emit valid JSON left 5.2 blank with no
+        // reason stored, and the user reasonably read that as the assistant failing
+        // to think. Prose here is wrapped into the same shape so everything
+        // downstream (fidelity checks, figures, export) keeps working unchanged.
+        const proseMessages = [
+          ...messages,
+          {
+            role: 'user' as const,
+            content:
+              'Reply with the finished section prose only — no JSON, no code fences, no commentary. Write the section now.',
+          },
+        ];
+        const prose = await completeWithFallback({
+          registry: this.registry,
+          primary: resolved.primary,
+          fallback: resolved.fallback,
+          request: { messages: proseMessages, signal: AbortSignal.timeout(this.config.AI_REQUEST_TIMEOUT_MS) },
+          onAttempt: async (credentialId, outcome, error, usage) => {
+            await this.usage.record(ctx, {
+              projectId,
+              credentialId,
+              jobId: options.jobId,
+              providerType: resolved.primary.providerType,
+              model: resolved.primary.model,
+              operation: 'generate_section_prose',
+              status: outcome,
+              errorCode: error?.code,
+              inputTokens: usage?.inputTokens,
+              outputTokens: usage?.outputTokens,
+            });
+          },
+        });
+        const proseRaw = prose.result.text.trim();
+        // The model was told "no JSON" and replied with JSON anyway. The envelope
+        // is long enough to pass a length check, so without unwrapping it the raw
+        // `{"section": ..., "body": ...}` text was saved as the section and
+        // exported into the finished PDF.
+        const unwrapped = unwrapJsonBody(proseRaw);
+        const proseBody = unwrapped.body;
+        if (proseBody.length < 40) {
+          throw new AppError(
+            'PROVIDER_ERROR',
+            'The model did not return a valid section payload, and the plain-prose retry was too short to use.',
+          );
+        }
+        parsed = sectionDraftZod.safeParse({
+          body: proseBody,
+          citedChunkIds: [],
+          warnings: unwrapped.unwrapped
+            ? ['The model replied with a JSON envelope instead of plain prose; only its body text was kept.']
+            : [],
+          placeholders: [],
+        });
+        completion = { ...prose, fellBack: completion.fellBack || prose.fellBack };
+        if (!parsed.success) {
+          throw new AppError('PROVIDER_ERROR', 'The model did not return a valid section payload after a repair attempt.');
+        }
       }
     } else if (!parsed.success) {
       throw new AppError('PROVIDER_ERROR', 'The model did not return a valid section payload.');
     }
 
     // ---- post-generation validation -------------------------------------
+    // Final guard: whatever path produced this text (initial reply, JSON repair,
+    // or the plain-prose retry), a serialised object must never be saved as a
+    // section body. Three sections of a real report shipped as raw JSON because
+    // this check did not exist.
+    if (looksLikeSerialisedSection(parsed.data.body)) {
+      const rescued = unwrapJsonBody(parsed.data.body);
+      if (rescued.unwrapped && rescued.body.length >= 40) {
+        parsed.data.body = rescued.body;
+        parsed.data.warnings.push('The model returned a JSON envelope; only its body text was kept.');
+      } else {
+        throw new AppError(
+          'PROVIDER_ERROR',
+          'The model returned a JSON envelope without a usable body, so nothing was saved. Try generating this section again.',
+        );
+      }
+    }
     const warnings = [...parsed.data.warnings];
     // Quotes the model invented around a passage (`???Reply from…???`) appear in
     // no source and must not reach the document.
@@ -376,7 +453,11 @@ export class GenerationService {
     // writes the bare damaged token, which then reads as a real command in the
     // report. Anything the evidence flagged as a likely misread is marked in the
     // body too, so the reader can see it was not certain.
-    const bodyScan = markSuspiciousInBody(parsed.data.body, evidence.map((chunk) => chunk.text).join('\n'));
+    // Mark each doubtful token once per section. Marking every occurrence is what
+    // produced 52 identical markers in one report, which buried the prose.
+    const bodyScan = markSuspiciousInBody(parsed.data.body, evidence.map((chunk) => chunk.text).join('\n'), {
+      firstOnly: true,
+    });
     const tableScan = markSuspiciousInTable(parsed.data.table ?? null, evidence.map((chunk) => chunk.text).join('\n'));
     // Tables carry the report's actual findings, and they bypass the prose body
     // entirely, so they need the same treatment or the doubt is lost where it
@@ -465,11 +546,18 @@ export class GenerationService {
 
     // A diagram or CLI screenshot is evidence the prose cannot reproduce, and OCR
     // reads its labels imperfectly. Attach the source image itself so the reader
-    // sees the original — but only where it belongs. One screenshot yields dozens
-    // of chunks, so counting citations selects everything; instead the image's own
-    // OCR text is matched against the heading, so the DHCP pool screenshot lands in
-    // the DHCP section and `show ip ospf neighbor` lands in the OSPF section.
-    const figures = selectFiguresForSection(evidence, section.heading ?? '');
+    // sees the original — but only where it belongs.
+    //
+    // Figure selection must NOT depend on `evidence`, because retrieval maps TEXT
+    // chunks: in practice a section's evidence rarely contains any image chunk, so
+    // selection returned nothing and sections that plainly needed a picture (the
+    // wireless Access Point panel) shipped with an empty template box. Match against
+    // every image in the project instead, scored by the same heading/signal logic.
+    const imagePool = await this.loadProjectImages(ctx, projectId);
+    const figures = selectFiguresForSection(
+      imagePool.length > 0 ? imagePool : evidence,
+      section.heading ?? '',
+    );
 
     const updated = await this.saveContent(ctx, projectId, sectionId, parsed.data.body, 'draft', reportSection.revision, {
       warnings,
@@ -491,6 +579,45 @@ export class GenerationService {
       fallbackUsed: completion.fellBack,
       wordCount: updated.wordCount,
     };
+  }
+
+  /**
+   * Records a drafting failure ON the section itself.
+   *
+   * A failure used to live only in the job's result array, so the outline showed an
+   * empty section with `warnings: []`: the user could not tell whether the evidence
+   * was missing, the model broke, or the assistant simply skipped it. Writing a
+   * marked placeholder makes the report explain itself and keeps the section
+   * actionable. Real content is never overwritten.
+   *
+   * Used by both the multi-section run and the single-section job, so the two paths
+   * cannot disagree about what a failure looks like.
+   */
+  async recordDraftFailure(
+    ctx: AuthContext,
+    projectId: string,
+    sectionId: string,
+    message: string,
+  ): Promise<boolean> {
+    const prior = await this.ensureReportSection(ctx, projectId, sectionId);
+    if (prior.content.trim()) return false;
+    await this.saveContent(
+      ctx,
+      projectId,
+      sectionId,
+      `[MISSING: this section could not be drafted automatically — ${message} Ask again to retry, or write it by hand.]`,
+      'needs_review',
+      prior.revision ?? 1,
+      {
+        warnings: [`Drafting failed: ${message}`],
+        citedChunkIds: [],
+        placeholders: ['[MISSING: this section could not be drafted automatically.]'],
+        providerCredentialId: null,
+        modelUsed: null,
+        table: null,
+      },
+    );
+    return true;
   }
 
   private async saveContent(
@@ -653,7 +780,14 @@ export class GenerationService {
         results.push({ sectionId: section.id, ok: true });
         if (outcome.keptTemplateText) keptTemplateText.push({ sectionId: section.id, heading: section.heading });
       } catch (error) {
-        results.push({ sectionId: section.id, ok: false, error: (error as Error).message });
+        const message = (error as Error).message;
+        results.push({ sectionId: section.id, ok: false, error: message });
+        // Persist the failure ON the section: see recordDraftFailure().
+        try {
+          await this.recordDraftFailure(ctx, projectId, section.id, message);
+        } catch {
+          // Recording the reason must never mask the original failure.
+        }
       }
       done += 1;
       await onProgress?.(done, limited.length, section.heading);
@@ -752,6 +886,50 @@ export class GenerationService {
     return this.facts.conflictsForProject(ctx, projectId);
   }
 
+  /**
+   * Every image in the project, shaped like evidence rows, for figure selection.
+   *
+   * Coverage cannot come from `section_mappings.evidence_chunk_ids`: retrieval maps
+   * TEXT, so image chunks are almost never in there and figure selection silently
+   * found nothing. Reading the project's images directly makes "which screenshot
+   * belongs here" a question about the project, not about retrieval luck.
+   */
+  private async loadProjectImages(
+    ctx: AuthContext,
+    projectId: string,
+  ): Promise<Array<{ id: string; documentId: string; documentName: string; mimeType: string; text: string }>> {
+    const rows = await this.db
+      .select({
+        id: extractedChunks.id,
+        documentId: documents.id,
+        documentName: documents.originalName,
+        mimeType: documents.mimeType,
+        text: extractedChunks.text,
+        ordinal: extractedChunks.ordinal,
+      })
+      .from(extractedChunks)
+      .innerJoin(documents, eq(documents.id, extractedChunks.documentId))
+      .where(
+        and(
+          eq(extractedChunks.userId, ctx.userId),
+          eq(extractedChunks.projectId, projectId),
+          eq(documents.userId, ctx.userId),
+          sql`${documents.mimeType} like 'image/%'`,
+        ),
+      )
+      .orderBy(extractedChunks.documentId, extractedChunks.ordinal);
+
+    return rows
+      .filter((row) => (row.mimeType ?? '').startsWith('image/'))
+      .map((row) => ({
+        id: row.id,
+        documentId: row.documentId,
+        documentName: row.documentName,
+        mimeType: row.mimeType ?? 'image/png',
+        text: row.text,
+      }));
+  }
+
 }
 
 /**
@@ -789,6 +967,17 @@ export function selectFiguresForSection(
     byDocument.set(chunk.documentId, entry);
   }
 
+  // "Desain Arsitektur Topologi Jaringan" is the section that OWNS the topology
+  // diagram, so a diagram must be selectable without keyword luck: OCR of a Packet
+  // Tracer canvas is just device labels ("PC-0", "2911", "Gi0/0"), which contain
+  // none of the words "topologi" or "diagram". Without this the template's first
+  // reserved box — "[ TEMPELKAN SCREENSHOT: Diagram Topologi … ]" — stayed empty while
+  // ten other boxes were filled.
+  const wantsDiagram = /\b(topologi|topology|arsitektur|architecture|diagram|skema)/i.test(headingLower);
+  const diagramIds = wantsDiagram
+    ? [...byDocument.entries()].filter(([, entry]) => looksLikeDiagram(entry.text.join('\n'))).map(([id]) => id)
+    : [];
+
   /**
    * Signals that identify what a screenshot shows, paired with the heading words
    * that make it relevant. Matching is deliberately concrete: a generic word like
@@ -796,11 +985,6 @@ export function selectFiguresForSection(
    */
   const signals: Array<{ pattern: RegExp; topic: RegExp }> = [
     { pattern: /show\s+ip\s+ospf\s+neighbor/i, topic: /ospf|neighbor|ketetanggaan/i },
-    // A topology diagram shows device names with interface labels and no CLI prompt.
-    {
-      pattern: /(router|switch|server|pc|laptop|smartphone)\d*\b/i,
-      topic: /topologi|arsitektur|desain|diagram/i,
-    },
     { pattern: /show\s+ip\s+route/i, topic: /forwarding|routing|rute|tabel routing/i },
     { pattern: /show\s+ip\s+interface\s+brief/i, topic: /interface|antarmuka|alokasi ip|verifikasi alokasi/i },
     { pattern: /tracert/i, topic: /traceroute|penelusuran|jalur/i },
@@ -819,6 +1003,11 @@ export function selectFiguresForSection(
     for (const { pattern, topic } of signals) {
       if (pattern.test(joined) && topic.test(headingLower)) score += isCli ? 2 : 1;
     }
+    // The topology box asks for a drawing. A drawn canvas must beat every command
+    // capture, otherwise a ping/tracert screenshot that happens to name a server
+    // wins on keyword count and the reserved box stays empty.
+    if (diagramIds.includes(documentId)) score += 3;
+    else if (wantsDiagram && isCli) score = 0;
     return { documentId, caption: `Sumber: ${entry.name}`, score };
   });
 
@@ -831,6 +1020,32 @@ export function selectFiguresForSection(
     .sort((a, b) => a.caption.localeCompare(b.caption))
     .slice(0, max)
     .map(({ documentId, caption }) => ({ documentId, caption }));
+}
+
+/**
+ * True when an image's OCR text reads like a drawn network canvas rather than a
+ * command-line capture.
+ *
+ * Packet Tracer labels are a mix of device models ("2911", "2960"), host names
+ * ("PC-0", "Laptop1", "Server0") and interface labels ("Gi0/0", "Fa0/1"), with no
+ * CLI prompt anywhere. That fingerprint is what lets the topology section claim the
+ * diagram even though the screenshot never spells the word "topologi".
+ */
+export function looksLikeDiagram(text: string): boolean {
+  if (!text.trim()) return false;
+  // Any command prompt at all — `R-KABEL>`, `C:\> ping`, `C:\>tracert` — means the
+  // image is a terminal capture, not a canvas. Packet Tracer canvases have no prompt.
+  const hasPrompt =
+    /[A-Za-z0-9_.\-]{2,}\s*[>#]/.test(text) ||
+    /C:\\/.test(text) ||
+    /\b(show\s+\w+|enable|configure terminal|tracert|ipconfig)\b/i.test(text);
+  if (hasPrompt) return false;
+  // Ping replies are terminal output whatever the extraction mangled the prompt into.
+  if (/pinging\b|ping statistics|reply from\b|tracing route\b|trace complete/i.test(text)) return false;
+  const deviceHits = (text.match(/\b(pc|router|switch|laptop|smartphone|server|ap)[\s\-]*\d+\b/gi) ?? []).length;
+  const modelHits = (text.match(/\b(19\d\d|29\d\d|36\d\d|43\d\d|3\d\d\d)\b/g) ?? []).length;
+  const interfaceHits = (text.match(/\b(gi|fa|se|gigabitethernet|fastethernet)\s?\d+\/\d+\b/gi) ?? []).length;
+  return deviceHits + modelHits + interfaceHits >= 3;
 }
 
 function safeParseJson(text: string): unknown {

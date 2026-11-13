@@ -148,6 +148,42 @@ describe('documented API contracts', () => {
     expect(res.body.credentials[0]).toMatchObject({ keyLast4: expect.any(String), model: 'test-model' });
   });
 
+  it('GET /api/provider-credentials/:id/models degrades to a message, never a crash', async () => {
+    // The credential above points at an unreachable host, which is exactly the
+    // case that must not throw: a provider without a catalogue is still usable,
+    // so the UI is told to fall back to manual entry.
+    const created = await user.client.post('/api/provider-credentials', {
+      displayName: 'Model lister',
+      providerType: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'test-model',
+      apiKey: 'sk-model-lister-secret',
+    });
+    const res = await user.client.get(`/api/provider-credentials/${created.body.credential.id}/models`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.models)).toBe(true);
+    expect(typeof res.body.message).toBe('string');
+    expect(typeof res.body.supported).toBe('boolean');
+    // The API key must never leak back through the error message.
+    expect(JSON.stringify(res.body)).not.toContain('sk-model-lister-secret');
+  });
+
+  it('GET /api/provider-credentials/:id/models lists a dev-offline model without a network call', async () => {
+    const session = await user.client.get('/api/auth/session');
+    if (!session.body.registrationEnabled) return;
+    const created = await user.client.post('/api/provider-credentials', {
+      displayName: 'Offline lister',
+      providerType: 'dev-offline',
+      model: 'dev-offline-model',
+      apiKey: 'not-a-real-key',
+    });
+    if (created.status !== 201) return; // dev provider disabled on this instance
+    const res = await user.client.get(`/api/provider-credentials/${created.body.credential.id}/models`);
+    expect(res.status).toBe(200);
+    expect(res.body.models).toEqual(['dev-offline-model']);
+    expect(res.body.supported).toBe(true);
+  });
+
   it('GET /api/usage returns windowDays, totals and byModel', async () => {
     const res = await user.client.get('/api/usage');
     expect(res.status).toBe(200);

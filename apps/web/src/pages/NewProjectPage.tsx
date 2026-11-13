@@ -4,6 +4,7 @@ import { PROVIDER_PRESETS, REPORT_LANGUAGES, REPORT_TONES } from '@formaai/share
 import { api, errorMessage } from '../lib/api';
 import type { Project } from '../lib/types';
 import { PageHeader } from '../components/Feedback';
+import { Select } from '../components/Select';
 
 type TargetLength = 'short' | 'medium' | 'long';
 
@@ -106,18 +107,16 @@ export function NewProjectPage() {
             <label className="label" htmlFor="language">
               Report language
             </label>
-            <select
+            <Select
               id="language"
-              className="input"
+              aria-label="Report language"
               value={language}
-              onChange={(event) => setLanguage(event.target.value)}
-            >
-              {REPORT_LANGUAGES.map((code) => (
-                <option key={code} value={code}>
-                  {LANGUAGE_LABELS[code] ?? code}
-                </option>
-              ))}
-            </select>
+              onChange={setLanguage}
+              options={REPORT_LANGUAGES.map((code) => ({
+                value: code,
+                label: LANGUAGE_LABELS[code] ?? code,
+              }))}
+            />
           </div>
         </div>
 
@@ -126,28 +125,32 @@ export function NewProjectPage() {
             <label className="label" htmlFor="tone">
               Tone
             </label>
-            <select id="tone" className="input" value={tone} onChange={(event) => setTone(event.target.value)}>
-              {REPORT_TONES.map((value) => (
-                <option key={value} value={value}>
-                  {value[0]!.toUpperCase() + value.slice(1)}
-                </option>
-              ))}
-            </select>
+            <Select
+              id="tone"
+              aria-label="Tone"
+              value={tone}
+              onChange={setTone}
+              options={REPORT_TONES.map((value) => ({
+                value,
+                label: value[0]!.toUpperCase() + value.slice(1),
+              }))}
+            />
           </div>
           <div>
             <label className="label" htmlFor="targetLength">
               Target section length
             </label>
-            <select
+            <Select
               id="targetLength"
-              className="input"
+              aria-label="Target section length"
               value={targetLength}
-              onChange={(event) => setTargetLength(event.target.value as TargetLength)}
-            >
-              <option value="short">Short — 120–180 words</option>
-              <option value="medium">Medium — 250–350 words</option>
-              <option value="long">Long — 450–700 words</option>
-            </select>
+              onChange={(next) => setTargetLength(next as TargetLength)}
+              options={[
+                { value: 'short', label: 'Short — 120–180 words' },
+                { value: 'medium', label: 'Medium — 250–350 words' },
+                { value: 'long', label: 'Long — 450–700 words' },
+              ]}
+            />
           </div>
         </div>
 

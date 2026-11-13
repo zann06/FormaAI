@@ -9,7 +9,7 @@
  * regression can return quietly.
  */
 import { describe, expect, it } from 'vitest';
-import { selectFiguresForSection } from '../src/services/generation/index.js';
+import { looksLikeDiagram, selectFiguresForSection } from '../src/services/generation/index.js';
 import { identityReplacements } from '../src/services/export/index.js';
 
 /** Builds the evidence shape the generator produces: one chunk per OCR line. */
@@ -65,6 +65,63 @@ describe('selectFiguresForSection', () => {
   it('picks the topology diagram for the topology section', () => {
     const picked = selectFiguresForSection(evidence, '2.1 Desain Arsitektur Topologi Jaringan');
     expect(picked.map((p) => p.caption)).toContain('Sumber: 1.png');
+  });
+
+  /**
+   * The reported Test 6 export filled ten of eleven reserved boxes and left
+   * "[ TEMPELKAN SCREENSHOT: Diagram Topologi … ]" — the first one — empty. OCR of a
+   * Packet Tracer canvas is only device labels and interface names, so a rule that
+   * required the word "topologi" in the image text never selected it.
+   */
+  it('claims the diagram from its drawn labels, not from the word "topologi"', () => {
+    const canvas = imageChunks('1.png', ['PC-0', 'PC-1', '2911', '2960', 'Gi0/0', 'Fa0/1', 'Server0']);
+    const picked = selectFiguresForSection(canvas, '2.1 Desain Arsitektur Topologi Jaringan');
+    expect(picked.map((p) => p.caption)).toEqual(['Sumber: 1.png']);
+  });
+
+  it('does not mistake a CLI capture for a diagram', () => {
+    // A command prompt means a terminal, however many device names it mentions.
+    const cli = imageChunks('2.png', ['R-KABEL#show ip interface brief', 'GigabitEthernet0/0 192.168.10.1 up up']);
+    const picked = selectFiguresForSection(cli, '2.1 Desain Arsitektur Topologi Jaringan');
+    expect(picked).toEqual([]);
+  });
+
+  /**
+   * The real Test 6 image pool: only 1.png and 13.png are canvases. 15.png is a
+   * `C:\> ping` + `C:\> tracert` capture that still names servers and interfaces, so
+   * it outscored the real diagram and the topology box was the one left empty.
+   */
+  const REAL_OCR: Record<string, string[]> = {
+    '1.png': [
+      'Gi90/0 | 1941 | 1941 | Roytert | ort | Gigd/1 | GI90/1',
+      'Fa0v1 | Fa0/1 | Fad | Fa0/2 | 2960p24TT | Fa0\'3 | Server-PT',
+      'Fa0/2 | Serverd | Fa0/4 | Fad | Acc | PT | Agtess P dirt0 | PCPT | PCO | PC1',
+    ],
+    '13.png': [
+      '1941 | Router0 | Gi0/0 | Gi0/1 | 2960p24TT | Fa0/1 | Fa0/2 | PC-PT | Server-PT',
+      'Router1 | Gi0/0 | AccessPoint-PT | PC0 | PC1 | Laptop0 | Smartphone0',
+    ],
+    '15.png': [
+      'C:\\> ping 192.168.10.10',
+      'Pinging 192.168.10.10 with 32 bytes of data',
+      'Reply from 192.168.10.10 TTL=128',
+      'Minimum = Oms, Maximum = Oms, Average = Oms | C:\\> tracert 192.168.10.10',
+      'Tracing route to 192.168.10.10 over a maximum of 30 hops:',
+      '1 Ooms ons ons 192.168.10.10 | Trace complete.',
+    ],
+  };
+  const realPool = Object.entries(REAL_OCR).flatMap(([name, lines]) => imageChunks(name, lines));
+
+  it('recognises the real canvases and rejects the real ping capture', () => {
+    expect(looksLikeDiagram(REAL_OCR['1.png']!.join('\n'))).toBe(true);
+    expect(looksLikeDiagram(REAL_OCR['13.png']!.join('\n'))).toBe(true);
+    expect(looksLikeDiagram(REAL_OCR['15.png']!.join('\n'))).toBe(false);
+  });
+
+  it('prefers the real canvas over the real ping capture for the topology section', () => {
+    const picked = selectFiguresForSection(realPool, '2.1 Desain Arsitektur Topologi Jaringan');
+    expect(picked.map((p) => p.caption)).not.toContain('Sumber: 15.png');
+    expect(picked.map((p) => p.caption).sort()).toEqual(['Sumber: 1.png', 'Sumber: 13.png']);
   });
 
   it('does not pull a traceroute capture into an unrelated section', () => {

@@ -36,6 +36,8 @@ export interface TestApp {
   storage: ReturnType<typeof createStorage>;
   /** Drains queued jobs synchronously so tests never wait on timers. */
   drainQueue: (maxJobs?: number) => Promise<number>;
+  /** Claims and runs at most one job, so a test can watch queue ordering. */
+  drainQueueOnce: () => Promise<number>;
   close: () => Promise<void>;
 }
 
@@ -111,6 +113,8 @@ export async function createTestApp(overrides: Partial<Record<string, string>> =
     db,
     storage,
     drainQueue: async (maxJobs = 50) => worker.runOnce(maxJobs),
+    /** Run exactly one claim+execute cycle — lets a test observe queue ordering. */
+    drainQueueOnce: async () => worker.runOnce(1),
     close: async () => {
       await server.app.close();
       await dbHandle.close();

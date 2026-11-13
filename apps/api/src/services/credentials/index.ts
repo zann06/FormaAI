@@ -8,7 +8,7 @@ import { aadFor, decryptSecret, encryptSecret, fingerprint, last4 } from '../../
 import { AppError, forbidden, notFound, validationError } from '../../lib/errors.js';
 import { randomUUID } from 'node:crypto';
 import type { ProviderCredentialCreateInput, ProviderCredentialUpdateInput, ProviderType } from '@formaai/shared';
-import { ProviderRegistry } from '@formaai/ai-providers';
+import { ProviderRegistry, fetchWithTimeout, normalizeBaseUrl, redactSecrets } from '@formaai/ai-providers';
 import type { ProviderConfig } from '@formaai/ai-providers';
 
 export interface PublicCredential {
@@ -339,6 +339,95 @@ export class CredentialService {
       })
       .where(and(eq(providerCredentials.id, credentialId), eq(providerCredentials.userId, ctx.userId)));
     return result;
+  }
+
+  /**
+   * Lists the models a provider exposes, using the stored (decrypted) key.
+   *
+   * Typing a model identifier by hand is the single most common way a report
+   * fails: one wrong character and every generation returns HTTP 404. Routers
+   * such as 9router, OpenRouter, Ollama and vLLM all publish `GET {baseUrl}/models`,
+   * so the real catalogue can be offered instead of guessed at.
+   *
+   * This is read-only and never throws for a provider that does not support the
+   * endpoint — it returns an empty list with a message, so the UI can fall back to
+   * manual entry instead of showing an error for a perfectly usable provider.
+   */
+  async listModels(
+    ctx: AuthContext,
+    credentialId: string,
+  ): Promise<{ models: string[]; message: string; supported: boolean }> {
+    const config = await this.toProviderConfig(ctx, credentialId);
+    if (config.providerType === 'dev-offline') {
+      return {
+        models: [config.model],
+        message: 'The offline development provider has a single built-in model.',
+        supported: true,
+      };
+    }
+    const baseUrl = normalizeBaseUrl(config.baseUrl);
+    if (!baseUrl) {
+      return { models: [], message: 'Add a base URL first.', supported: false };
+    }
+
+    // Anthropic and Gemini use their own catalogues; only the OpenAI-compatible
+    // shape is standardised enough to call generically.
+    const endpoint = config.providerType === 'openai-compatible' ? `${baseUrl}/models` : '';
+    if (!endpoint) {
+      return {
+        models: [],
+        message: `Listing models is not supported for ${config.providerType}. Enter the model ID manually.`,
+        supported: false,
+      };
+    }
+
+    try {
+      const response = await fetchWithTimeout(
+        endpoint,
+        {
+          method: 'GET',
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            ...(config.requestSettings?.extraHeaders ?? {}),
+          },
+        },
+        20_000,
+      );
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        return {
+          models: [],
+          message:
+            response.status === 401 || response.status === 403
+              ? 'The provider rejected the API key while listing models.'
+              : `The provider returned HTTP ${response.status} for /models. Enter the model ID manually. ${
+                  redactSecrets(text, [config.apiKey]).slice(0, 200)
+                }`,
+          supported: false,
+        };
+      }
+      const json = (await response.json().catch(() => null)) as
+        | { data?: Array<{ id?: unknown }>; models?: Array<{ name?: unknown; id?: unknown }> }
+        | null;
+      const ids = [
+        ...(json?.data ?? []).map((entry) => entry.id),
+        ...(json?.models ?? []).map((entry) => entry.id ?? entry.name),
+      ]
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        .map((id) => id.trim());
+      const models = [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+      return {
+        models,
+        message:
+          models.length > 0
+            ? `${models.length} model${models.length === 1 ? '' : 's'} available.`
+            : 'The provider returned an empty model list. Enter the model ID manually.',
+        supported: models.length > 0,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { models: [], message: `Could not reach /models: ${message}`, supported: false };
+    }
   }
 
   async setFallback(ctx: AuthContext, fallbackCredentialId: string | null) {

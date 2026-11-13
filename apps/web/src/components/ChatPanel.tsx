@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errorMessage } from '../lib/api';
 import { useToast } from '../lib/toast';
-import { planChatAction, summariseSteps, type ChatAction } from '../lib/chat-actions';
+import { mergeIdentity, planChatSteps, summariseSteps, type ChatAction } from '../lib/chat-actions';
+import { Select } from './Select';
 
 /**
  * The conversation panel — the primary surface of the workspace.
@@ -62,6 +63,8 @@ export interface ChatContext {
   emptyHeadings: string[];
   /** Headings in template order, for resolving "regenerate 2.3". */
   headings: string[];
+  /** Standing instructions, including cover fields (`Nama: …`, `NIM: …`). */
+  instructions: string | null;
   busy: boolean;
   pdfAvailable: boolean;
   exportReady: boolean;
@@ -86,30 +89,77 @@ function writeStored(key: string, value: unknown): void {
   }
 }
 
-/** Renders **bold**, `code` and line breaks — enough for report instructions. */
+/**
+ * Renders the small Markdown subset assistants actually emit: `**bold**`,
+ * `*italic*`/`_italic_`, `` `code` ``, bullet lists and line breaks.
+ *
+ * This used to handle only bold and code, so a reply containing `_emphasis_` or a
+ * `- ` bullet list showed the raw asterisks and underscores to the user. Headings
+ * are deliberately not rendered as headings: a chat reply that starts with `#`
+ * should not restyle the panel, so the marker is stripped and the line is shown in
+ * bold instead.
+ */
 function renderInline(text: string) {
-  return text.split('\n').map((line, lineIndex) => (
-    <span key={lineIndex}>
-      {lineIndex > 0 && <br />}
-      {line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, partIndex) => {
-        if (part.startsWith('**') && part.endsWith('**')) {
-          return (
-            <strong key={partIndex} className="font-semibold">
-              {part.slice(2, -2)}
-            </strong>
-          );
-        }
-        if (part.startsWith('`') && part.endsWith('`')) {
-          return (
-            <code key={partIndex} className="rounded bg-ink-100 px-1 py-0.5 font-mono text-[11px]">
-              {part.slice(1, -1)}
-            </code>
-          );
-        }
-        return <span key={partIndex}>{part}</span>;
-      })}
-    </span>
-  ));
+  const lines = text.split('\n');
+  return lines.map((line, lineIndex) => {
+    const trimmedLine = line.trimStart();
+    const bullet = /^([-*•])\s+(.*)$/.exec(trimmedLine);
+    const heading = /^#{1,6}\s+(.*)$/.exec(trimmedLine);
+
+    // Bullets and headings become their own block so the marker disappears.
+    if (bullet || heading) {
+      return (
+        <span key={lineIndex} className="block">
+          {bullet ? (
+            <span className="flex gap-1.5">
+              <span aria-hidden className="text-ink-400">
+                •
+              </span>
+              <span>{renderSpans(bullet[2]!)}</span>
+            </span>
+          ) : (
+            <strong className="font-semibold">{renderSpans(heading![1]!)}</strong>
+          )}
+        </span>
+      );
+    }
+
+    return (
+      <span key={lineIndex}>
+        {lineIndex > 0 && <br />}
+        {renderSpans(line)}
+      </span>
+    );
+  });
+}
+
+/** Inline-only formatting for a single line: bold, italic and code. */
+function renderSpans(line: string) {
+  return line.split(/(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|_[^_\n]+_)/g).map((part, partIndex) => {
+    if (!part) return null;
+    if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
+      return (
+        <strong key={partIndex} className="font-semibold">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code key={partIndex} className="rounded bg-ink-100 px-1 py-0.5 font-mono text-[11px]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
+      return (
+        <em key={partIndex} className="italic">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    return <span key={partIndex}>{part}</span>;
+  });
 }
 
 /** The icon and colour for each kind of trail entry. */
@@ -145,7 +195,7 @@ export function ChatPanel({
   onOpenOutline: () => void;
   /** Runs the full pipeline; resolves with the job's steps for the trail. */
   onRunPipeline: () => Promise<{ summary: string; steps: Array<{ name: string; status: string; message?: string }> } | null>;
-  onExport: (format: 'docx' | 'pdf') => Promise<{ ok: boolean; message: string }>;
+  onExport: (format: 'docx' | 'pdf') => Promise<{ ok: boolean; message: string; missingCoverFields?: string[] }>;
   onChanged: () => void;
 }) {
   const toast = useToast();
@@ -245,6 +295,49 @@ export function ChatPanel({
     return steps;
   }, [context, selectedProvider]);
 
+  /**
+   * Answers a question from the report's real state.
+   *
+   * The chat used to have no conversational path at all: any message that was not a
+   * command was written into `projects.instructions`, so asking "what is still empty?"
+   * changed the project and answered nothing. This speaks from the same context the
+   * status view uses, so the answer and the numbers always agree.
+   */
+  const answerQuestion = useCallback(
+    (question: string): string => {
+      const lower = question.toLowerCase();
+      const missing = context.emptyHeadings;
+
+      if (/\b(empty|kosong|belum|missing|kurang|incomplete|mana yang)\b/.test(lower)) {
+        if (missing.length === 0) {
+          return `Nothing is empty — all ${context.total} sections have content. Ask me to **export** when you are ready.`;
+        }
+        return `Still empty (${missing.length} of ${context.total}): ${missing.slice(0, 10).join(', ')}${
+          missing.length > 10 ? `, and ${missing.length - 10} more` : ''
+        }. Those need a source that covers them, or a line of your own. Say **generate** and I will draft everything that has evidence.`;
+      }
+
+      if (/\b(gambar|image|figure|screenshot|foto)\b/.test(lower)) {
+        return 'Screenshots from your sources are placed into the template\'s reserved boxes at export time, matched by what each box asks for (for example "Diagram Topologi" gets the topology picture). I do not invent images — if no source picture matches a box, that box is reported instead of being filled with something unrelated.';
+      }
+
+      if (/\b(cover|sampul|nama|nim|kelas)\b/.test(lower)) {
+        return 'The cover is filled at export from what you tell me here. Say something like "Nama: Farid, NIM: 124140210, Kelas: RA" and I will store it so the exported cover carries it.';
+      }
+
+      if (/\b(export|download|unduh|docx|pdf)\b/.test(lower)) {
+        return context.exportReady
+          ? 'A DOCX is ready — open **Downloads** to get it. Ask for "export PDF" if you need the PDF instead.'
+          : 'No file has been built yet. Say **export DOCX** or **export PDF** and I will build it from the current content.';
+      }
+
+      return `Here is where things stand: ${context.drafted} of ${context.total} sections have content${
+        missing.length > 0 ? `, and ${missing.length} are still empty` : ''
+      }. Ask me to **generate**, **export**, or tell me your cover details.`;
+    },
+    [context],
+  );
+
   /** Runs the pipeline and turns its step report into the visible trail. */
   const runGenerate = useCallback(
     async (replyId: string, target?: string) => {
@@ -325,13 +418,21 @@ export function ChatPanel({
             { tone: 'action', text: `Building the ${format.toUpperCase()} file` },
           ]);
           const outcome = await onExport(format);
+          const missingCover = outcome.ok ? (outcome.missingCoverFields ?? []) : [];
           appendSteps(replyId, [
             { tone: 'checking', text: 'Required sections checked.' },
+            ...(missingCover.length > 0
+              ? [{ tone: 'warn' as const, text: `Cover still blank: ${missingCover.join(', ')}.` }]
+              : []),
             { tone: outcome.ok ? 'result' : 'error', text: outcome.message },
           ]);
           patch(replyId, {
             text: outcome.ok
-              ? `Your ${format.toUpperCase()} is ready — open **Downloads** to get it.`
+              ? missingCover.length > 0
+                ? `Your ${format.toUpperCase()} is ready — open **Downloads** to get it. One thing is still blank on the cover: ${missingCover.join(
+                    ', ',
+                  )}. Tell me e.g. “Nama: Farid Rizky, NIM: 124140210, Kelas: RA” and I will fill it and rebuild the file.`
+                : `Your ${format.toUpperCase()} is ready — open **Downloads** to get it.`
               : 'The file was not produced. The reason is above; fix it and ask me again.',
             pending: false,
           });
@@ -367,6 +468,40 @@ export function ChatPanel({
             pending: false,
           });
           return;
+        case 'identity': {
+          const fields = action.identity ?? {};
+          const merged = mergeIdentity(context.instructions, fields);
+          appendSteps(replyId, [{ tone: 'action', text: 'Saving your cover details on the project.' }]);
+          try {
+            await api.patch(`/api/projects/${projectId}`, { instructions: merged });
+            const named = (['nama', 'nim', 'kelas', 'tanggal'] as const)
+              .filter((field) => fields[field])
+              .map((field) => `${field}: ${fields[field]}`);
+            appendSteps(replyId, [
+              { tone: 'result', text: `Saved for the cover — ${named.join(', ')}.` },
+              {
+                tone: 'thinking',
+                text: context.exportReady
+                  ? 'The existing file still shows the old cover. Export again and I will rebuild it with these details.'
+                  : 'The next export will print these details on the cover.',
+              },
+            ]);
+            patch(replyId, {
+              text: context.exportReady
+                ? `Cover details saved. Say **export** and I will rebuild the file with them on the cover.`
+                : 'Cover details saved. They will appear on the cover when you export.',
+              pending: false,
+            });
+            onChanged();
+          } catch (error) {
+            appendSteps(replyId, [{ tone: 'error', text: `Could not save: ${errorMessage(error)}` }]);
+            patch(replyId, {
+              text: 'Those cover details were not saved, so the cover will stay blank until you tell me again.',
+              pending: false,
+            });
+          }
+          return;
+        }
         default: {
           // A free-form instruction: store it on the project so the next draft
           // follows it, and say so plainly instead of pretending to chat.
@@ -407,11 +542,39 @@ export function ChatPanel({
       // Planning is inside the try: if it throws, the reply must still be answered.
       // Leaving it outside meant a message could sit as "pending" forever with no
       // reply at all — which reads as the assistant silently ignoring the user.
-      const action = planChatAction(text, { headings: context.headings });
+      const steps = planChatSteps(text, { headings: context.headings });
+
+      // A question is answered, not executed. Previously "apa yang masih kosong?"
+      // was silently stored as an instruction, so the user got no answer at all.
+      if (steps.length === 0) {
+        appendSteps(reply.id, statusLines());
+        patch(reply.id, { text: answerQuestion(text), pending: false });
+        return;
+      }
+
       // Appended, not replaced: the trail should read as a sequence of what the
       // assistant did, starting with how it understood the request.
-      appendSteps(reply.id, [{ tone: 'checking', text: `Understood as: ${action.label.toLowerCase()}.` }]);
-      await handleAction(action, reply.id);
+      appendSteps(reply.id, [
+        {
+          tone: 'checking',
+          text:
+            steps.length > 1
+              ? `Understood as ${steps.length} steps: ${steps
+                  .map((step) => step.label.toLowerCase())
+                  .join(', then ')}.`
+              : `Understood as: ${steps[0]!.label.toLowerCase()}.`,
+        },
+      ]);
+      // Run every step in order. A compound request ("perbaiki lalu export") used to
+      // execute only its first half, which is why the chat felt like it was storing
+      // instructions instead of doing the work.
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index]!;
+        if (index > 0) {
+          appendSteps(reply.id, [{ tone: 'thinking', text: `Next: ${step.label.toLowerCase()}…` }]);
+        }
+        await handleAction(step, reply.id);
+      }
     } catch (error) {
       appendSteps(reply.id, [{ tone: 'error', text: errorMessage(error) }]);
       patch(reply.id, {
@@ -593,7 +756,7 @@ export function ChatPanel({
                     </ol>
                   )}
                   {message.text && (
-                    <div className="text-sm leading-relaxed text-ink-800">
+                    <div className="text-sm leading-relaxed text-ink-800" data-testid="chat-answer">
                       <p className="whitespace-pre-wrap break-words">{renderInline(message.text)}</p>
                     </div>
                   )}
@@ -667,27 +830,30 @@ export function ChatPanel({
           </div>
 
           <div className="flex items-center justify-between gap-2 px-2 pb-1.5 pt-1">
-            <label className="flex min-w-0 items-center gap-1 text-[11px] text-ink-500">
-              <span className="sr-only">Model</span>
-              {providers.length > 0 ? (
-                <select
-                  value={selectedProvider?.id ?? ''}
-                  onChange={(event) => onSelectProvider(event.target.value)}
-                  className="max-w-[210px] truncate rounded border-0 bg-transparent py-0.5 text-[11px] text-ink-700 outline-none"
-                  data-testid="chat-model"
-                >
-                  {providers.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.model} · {provider.providerType}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <button type="button" className="underline hover:text-ink-800" onClick={onOpenSettings} data-testid="chat-no-model">
-                  No model — add a provider
-                </button>
-              )}
-            </label>
+            {providers.length > 0 ? (
+              <Select
+                size="sm"
+                className="max-w-[240px]"
+                aria-label="Model"
+                data-testid="chat-model"
+                value={selectedProvider?.id ?? ''}
+                onChange={onSelectProvider}
+                options={providers.map((provider) => ({
+                  value: provider.id,
+                  label: provider.model,
+                  description: `${provider.providerType}${provider.isDefault ? ' · default' : ''}`,
+                }))}
+              />
+            ) : (
+              <button
+                type="button"
+                className="text-[11px] text-ink-500 underline hover:text-ink-800"
+                onClick={onOpenSettings}
+                data-testid="chat-no-model"
+              >
+                No model — add a provider
+              </button>
+            )}
             <span className="shrink-0 truncate text-[10px] text-ink-400" data-testid="chat-hint">
               {busy ? 'Working…' : 'Enter to send · Shift+Enter for a new line'}
             </span>

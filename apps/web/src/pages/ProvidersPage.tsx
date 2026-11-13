@@ -5,6 +5,7 @@ import type { Credential, CredentialsResponse } from '../lib/types';
 import { PageHeader, EmptyState, ErrorState, Spinner } from '../components/Feedback';
 import { Badge } from '../components/StatusBadges';
 import { Dialog, ConfirmDialog } from '../components/Dialog';
+import { Select } from '../components/Select';
 import { useToast } from '../lib/toast';
 import { useSession } from '../lib/session';
 import { formatRelative } from '../lib/format';
@@ -47,6 +48,11 @@ export function ProvidersPage() {
   const [deleteTarget, setDeleteTarget] = useState<Credential | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
+  /** Models returned by `GET {baseUrl}/models` for the credential being edited. */
+  const [models, setModels] = useState<string[] | null>(null);
+  const [modelsMessage, setModelsMessage] = useState<string | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelFilter, setModelFilter] = useState('');
 
   const load = useCallback(async () => {
     setError(null);
@@ -66,11 +72,17 @@ export function ProvidersPage() {
 
   function openCreate() {
     setFormError(null);
+    setModels(null);
+    setModelsMessage(null);
+    setModelFilter('');
     setForm({ ...EMPTY_FORM });
   }
 
   function openEdit(credential: Credential) {
     setFormError(null);
+    setModels(null);
+    setModelsMessage(null);
+    setModelFilter('');
     setForm({
       id: credential.id,
       displayName: credential.displayName,
@@ -80,6 +92,49 @@ export function ProvidersPage() {
       apiKey: '',
       isDefault: credential.isDefault,
     });
+  }
+
+  /**
+   * Asks the provider itself which models it serves.
+   *
+   * A hand-typed model ID is the most common cause of a failed generation (HTTP
+   * 404 on every call), so wherever the provider supports `GET {baseUrl}/models`
+   * the real catalogue is offered as a picker instead.
+   */
+  async function loadModels() {
+    if (!form) return;
+    setLoadingModels(true);
+    setModelsMessage(null);
+    try {
+      if (form.id) {
+        const result = await api.get<{ models: string[]; message: string; supported: boolean }>(
+          `/api/provider-credentials/${form.id}/models`,
+        );
+        setModels(result.models);
+        setModelsMessage(result.message);
+        // If the currently configured model is missing from the catalogue, keep it
+        // as a selectable option. Otherwise a `<select>` would silently snap to the
+        // first entry and saving the form would switch the user's model.
+        const current = form.model.trim();
+        if (current && result.models.length > 0 && !result.models.includes(current)) {
+          setModels([current, ...result.models]);
+          setModelsMessage(
+            `${result.message} Your current model “${current}” is not in that list — check it still exists.`,
+          );
+        }
+      } else {
+        // A brand-new credential has no stored key yet, so it cannot be queried.
+        setModels([]);
+        setModelsMessage(
+          'Save this provider first, then reopen it to load the model list from the server.',
+        );
+      }
+    } catch (err) {
+      setModels([]);
+      setModelsMessage(errorMessage(err));
+    } finally {
+      setLoadingModels(false);
+    }
   }
 
   function applyPreset(presetId: string) {
@@ -298,19 +353,18 @@ export function ProvidersPage() {
                 <label className="label" htmlFor="preset">
                   Preset
                 </label>
-                <select
+                <Select
                   id="preset"
-                  className="input"
-                  defaultValue=""
-                  onChange={(event) => applyPreset(event.target.value)}
-                >
-                  <option value="">Choose a preset (optional)…</option>
-                  {PROVIDER_PRESETS.filter((preset) => devAllowed(preset.type)).map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.label}
-                    </option>
-                  ))}
-                </select>
+                  aria-label="Preset"
+                  value=""
+                  placeholder="Choose a preset (optional)…"
+                  onChange={(next) => applyPreset(next)}
+                  options={PROVIDER_PRESETS.filter((preset) => devAllowed(preset.type)).map((preset) => ({
+                    value: preset.id,
+                    label: preset.label,
+                    description: preset.baseUrl,
+                  }))}
+                />
               </div>
             )}
             <div>
@@ -329,20 +383,15 @@ export function ProvidersPage() {
               <label className="label" htmlFor="providerType">
                 Provider type
               </label>
-              <select
+              <Select
                 id="providerType"
-                className="input"
+                aria-label="Provider type"
                 value={form.providerType}
-                onChange={(event) => setForm({ ...form, providerType: event.target.value })}
-              >
-                {Object.entries(TYPE_LABELS)
+                onChange={(next) => setForm({ ...form, providerType: next })}
+                options={Object.entries(TYPE_LABELS)
                   .filter(([type]) => devAllowed(type))
-                  .map(([type, label]) => (
-                    <option key={type} value={type}>
-                      {label}
-                    </option>
-                  ))}
-              </select>
+                  .map(([type, label]) => ({ value: type, label }))}
+              />
             </div>
             {form.providerType !== 'dev-offline' && (
               <div>
@@ -365,17 +414,72 @@ export function ProvidersPage() {
               </div>
             )}
             <div>
-              <label className="label" htmlFor="model">
-                Model
-              </label>
-              <input
-                id="model"
-                className="input"
-                value={form.model}
-                onChange={(event) => setForm({ ...form, model: event.target.value })}
-                placeholder="gpt-4o-mini"
-                maxLength={160}
-              />
+              <div className="mb-1.5 flex items-end justify-between gap-2">
+                <label className="label mb-0" htmlFor="model">
+                  Model
+                </label>
+                {form.providerType !== 'dev-offline' && (
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm text-brand-700"
+                    onClick={() => void loadModels()}
+                    disabled={loadingModels}
+                  >
+                    {loadingModels ? 'Loading…' : models ? 'Reload models' : 'Load models from server'}
+                  </button>
+                )}
+              </div>
+
+              {models && models.length > 0 ? (
+                <>
+                  {models.length > 8 && (
+                    <input
+                      type="search"
+                      className="input mb-2"
+                      placeholder={`Filter ${models.length} models…`}
+                      value={modelFilter}
+                      onChange={(event) => setModelFilter(event.target.value)}
+                      aria-label="Filter models"
+                    />
+                  )}
+                  <Select
+                    id="model"
+                    aria-label="Model"
+                    value={form.model}
+                    onChange={(next) => setForm({ ...form, model: next })}
+                    options={models
+                      .filter((name) => name.toLowerCase().includes(modelFilter.trim().toLowerCase()))
+                      .map((name) => ({ value: name, label: name }))}
+                  />
+                  <p className="hint">
+                    {modelsMessage ?? `${models.length} models available.`} Selected:{' '}
+                    <span className="font-medium text-ink-700">{form.model || 'none'}</span>
+                  </p>
+                </>
+              ) : (
+                <>
+                  <input
+                    id="model"
+                    className="input"
+                    value={form.model}
+                    onChange={(event) => setForm({ ...form, model: event.target.value })}
+                    placeholder="gpt-4o-mini"
+                    maxLength={160}
+                    list={form.id ? 'known-models' : undefined}
+                  />
+                  {models && models.length > 0 && (
+                    <datalist id="known-models">
+                      {models.map((name) => (
+                        <option key={name} value={name} />
+                      ))}
+                    </datalist>
+                  )}
+                  <p className={`hint ${modelsMessage ? 'text-ink-600' : ''}`}>
+                    {modelsMessage ??
+                      'Pick the exact model ID your provider serves. Use “Load models from server” to list them.'}
+                  </p>
+                </>
+              )}
             </div>
             <div>
               <label className="label" htmlFor="apiKey">

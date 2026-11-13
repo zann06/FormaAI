@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifySection, isDraftable, shouldKeepTemplateText } from '@formaai/shared';
+import { classifySection, isChapterDivider, isDraftable, shouldKeepTemplateText } from '@formaai/shared';
 
 /**
  * The template of the real reported project is the fixture: sections 0–5 are
@@ -113,5 +113,38 @@ describe('shouldKeepTemplateText', () => {
     expect(shouldKeepTemplateText('form')).toBe(true);
     expect(shouldKeepTemplateText('prose')).toBe(false);
     expect(shouldKeepTemplateText('listing')).toBe(false);
+  });
+});
+
+/**
+ * The reported report was called "36 of 44 written, 2 could not be drafted" while
+ * one of the two was only the label "BAB I: PENDAHULUAN" above 1.1–1.3. A chapter
+ * marker is allowed to be empty; a real section is not.
+ */
+describe('isChapterDivider', () => {
+  it('recognises a bare chapter marker in either language and numbering style', () => {
+    for (const heading of [
+      'BAB I: PENDAHULUAN',
+      'BAB IV',
+      'BAB 4',
+      'BAB III: HASIL DAN PEMBAHASAN',
+      'CHAPTER II',
+      'Chapter 2: Method',
+      'BAB I: PENDAHULUAN DAN LATAR BELAKANG MASALAH',
+      '  BAB V: PENUTUP  ',
+    ]) {
+      expect(isChapterDivider(heading)).toBe(true);
+    }
+  });
+
+  it('does not excuse a real section that merely starts with the word bab', () => {
+    for (const heading of ['Pendahuluan', 'BAB', 'Babylonia', 'BAB IAN', '1.1 Latar Belakang']) {
+      expect(isChapterDivider(heading)).toBe(false);
+    }
+  });
+
+  it('never treats an empty heading as a divider', () => {
+    expect(isChapterDivider('')).toBe(false);
+    expect(isChapterDivider('   ')).toBe(false);
   });
 });

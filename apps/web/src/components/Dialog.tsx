@@ -38,6 +38,12 @@ export function Dialog({
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
+        // A dropdown inside the dialog swallows Escape to close itself. It calls
+        // `stopPropagation` on the way down, but this listener runs on the way up,
+        // so without this check one Escape closed the combobox *and* the dialog —
+        // silently discarding anything the user had typed into the form. A handler
+        // that already dealt with the key marks the event as handled.
+        if (event.defaultPrevented) return;
         event.preventDefault();
         onCloseRef.current();
         return;

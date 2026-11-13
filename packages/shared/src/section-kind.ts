@@ -167,3 +167,25 @@ export function shouldKeepTemplateText(kind: SectionKind): boolean {
 export function isDraftable(kind: SectionKind): boolean {
   return kind === 'prose';
 }
+
+/**
+ * True when a heading is a CHAPTER DIVIDER that legitimately holds no prose.
+ *
+ * "BAB I: PENDAHULUAN" is a label above 1.1, 1.2, 1.3 — a real campus template
+ * writes nothing under it, and the document reads correctly that way. Counting it as
+ * an empty section made the assistant report "36 of 44 written, 2 could not be
+ * drafted" on a report that was actually complete, which reads as failure to the user
+ * and pushes them to "fix" something that is not broken.
+ *
+ * Deliberately narrow: only a bare chapter marker ("BAB IV", "BAB 4", "CHAPTER II")
+ * with no extra title text beyond it qualifies. "BAB I: PENDAHULUAN" is a divider too,
+ * because the chapter number is present. "Pendahuluan" on its own is NOT — some
+ * templates number chapters as plain prose sections and those must be written.
+ */
+export function isChapterDivider(heading: string): boolean {
+  const trimmed = heading.trim();
+  if (!trimmed) return false;
+  // "BAB I", "BAB 4", "BAB IV: TINJAUAN PUSTAKA", "CHAPTER 2: METHOD"
+  if (/^(bab|chapter)\s+([ivxlcdm]+|\d+)\b/i.test(trimmed)) return true;
+  return false;
+}

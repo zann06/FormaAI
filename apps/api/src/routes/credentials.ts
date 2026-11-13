@@ -62,6 +62,16 @@ export async function registerCredentialRoutes(instance: FastifyInstance, ctx: S
     return reply.send({ ok: true });
   });
 
+  instance.get(
+    '/api/provider-credentials/:credentialId/models',
+    { config: { rateLimit: { max: 30, timeWindow: '5 minutes' } } },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const { credentialId } = parseParams(request, credentialParams);
+      return reply.send(await credentials.listModels(user, credentialId));
+    },
+  );
+
   instance.get('/api/usage', async (request, reply) => {
     const user = requireUser(request);
     const [events, summary] = await Promise.all([ctx.usageService.list(user, 100), ctx.usageService.summary(user)]);

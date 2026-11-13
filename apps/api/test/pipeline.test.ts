@@ -446,6 +446,33 @@ describe('sections with no evidence do not sink the whole report', () => {
   });
 
   /**
+   * The second blocker on the reported project: "BAB I: PENDAHULUAN" is a chapter
+   * label above 1.1–1.3 and correctly has no body. Counting it as a missing section
+   * refused an otherwise finished export.
+   */
+  it('exports when the only empty required section is a chapter divider', async () => {
+    const projectId = await prepareProject('Chapter divider export');
+    const scan = await user.client.post(`/api/projects/${projectId}/pipeline`, { useAi: false });
+    expect((await waitForJob(projectId, scan.body.jobId)).status).toBe('succeeded');
+
+    // Added after drafting, so it stays empty the way the real chapter label does.
+    await addUnfillableSection(projectId, 'BAB I: PENDAHULUAN');
+
+    const exported = await user.client.post(`/api/projects/${projectId}/exports`, { format: 'docx' });
+    expect(exported.status).toBe(202);
+    const job = await waitForJob(projectId, exported.body.jobId);
+    expect(job.status).toBe('succeeded');
+
+    const artifact = await user.client.get(`/api/projects/${projectId}/exports`);
+    const ready = (artifact.body.exports as Array<{ status: string; warnings?: string[] }>).find(
+      (entry) => entry.status === 'ready',
+    );
+    expect(ready).toBeTruthy();
+    // Explained, not hidden: the outline can say why the row has no prose.
+    expect((ready?.warnings ?? []).join(' ')).toMatch(/Chapter dividers/i);
+  });
+
+  /**
    * The exact state from the reported screenshot: most sections drafted, one
    * section holding only a [MISSING: …] marker. Export must succeed.
    */

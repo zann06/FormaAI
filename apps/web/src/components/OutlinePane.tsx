@@ -2,6 +2,7 @@
 import { api, errorMessage } from '../lib/api';
 import type { MappingSection, OutlineSection, ReportSection } from '../lib/types';
 import { CoverageBadge, SectionStatusBadge } from './StatusBadges';
+import { Select } from './Select';
 import { useToast } from '../lib/toast';
 
 /**
@@ -209,19 +210,21 @@ export function OutlinePane({
               maxLength={400}
               autoFocus
             />
-            <label className="block">
+            <div className="block">
               <span className="text-xs text-ink-500">Level</span>
-              <select
+              <Select
+                size="sm"
+                className="mt-1"
                 aria-label="New section level"
-                className="input mt-1 w-full text-xs"
-                value={newLevel}
-                onChange={(event) => setNewLevel(Number(event.target.value))}
-              >
-                <option value={1}>1 — chapter</option>
-                <option value={2}>2 — sub-chapter</option>
-                <option value={3}>3 — sub-sub-chapter</option>
-              </select>
-            </label>
+                value={String(newLevel)}
+                onChange={(next) => setNewLevel(Number(next))}
+                options={[
+                  { value: '1', label: '1 — chapter' },
+                  { value: '2', label: '2 — sub-chapter' },
+                  { value: '3', label: '3 — sub-sub-chapter' },
+                ]}
+              />
+            </div>
             <div className="flex gap-2">
               <button type="submit" className="btn-primary text-xs" disabled={saving || !newHeading.trim()}>
                 {saving ? 'Adding…' : 'Add section'}

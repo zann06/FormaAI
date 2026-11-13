@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Deterministic DOCX assembly.
  *
  * Strategy: work on a *copy* of the original package. Only `word/document.xml`
@@ -26,6 +26,7 @@ import {
 } from './xml.js';
 import { readDocxPackage, writeDocxPackage, xmlToString, stringToXml, type DocxPackage } from './zip.js';
 import { analyzeDocumentXml, extractPlaceholders, partText } from './analyze.js';
+import { isScreenshotSlotText, matchFiguresToSlots } from './screenshot-slots.js';
 import type { FidelityReport, InsertionStrategy } from '@formaai/shared';
 
 export interface AssemblyTable {
@@ -48,6 +49,16 @@ export interface AssemblyFigure {
   /** File extension used for the media part and content type. */
   extension: 'png' | 'jpeg' | 'gif';
   caption?: string | null;
+  /**
+   * Which source image this came from.
+   *
+   * Templates reserve dashed boxes with "[ TEMPELKAN SCREENSHOT: â€¦ ]" instructions,
+   * and the right picture for a box is decided by matching the box's wording against
+   * the image's OCR text â€” so the figure has to carry its source identity here.
+   */
+  documentId?: string;
+  /** OCR text of the source image, used to pick the slot this figure belongs in. */
+  text?: string | null;
 }
 
 export interface AssemblySection {
@@ -138,6 +149,22 @@ function runPropsOf(paragraph: XmlNode): XmlNode | null {
   return firstRun ? (findChild(firstRun, 'w:rPr') ?? null) : null;
 }
 
+/**
+ * Run properties for generated body text, always safe to modify.
+ *
+ * Returns a CLONE. `buildContentParagraphs` strips bold/size/colour from these
+ * before using them for prose, and handing back the heading's live `<w:rPr>` meant
+ * that strip edited the heading itself: every generated section silently turned its
+ * own heading from bold 14pt dark blue into plain body text. The visible damage was
+ * a document whose headings looked like paragraphs, and the fidelity check then
+ * failed with "Heading count changed from 44 to 8" because headings are detected
+ * from exactly that formatting â€” which blocked the PDF export as well.
+ */
+function clonedRunPropsOf(paragraph: XmlNode): XmlNode | null {
+  const props = runPropsOf(paragraph);
+  return props ? cloneNode(props) : null;
+}
+
 function paragraphPropsOf(paragraph: XmlNode): XmlNode | null {
   return findChild(paragraph, 'w:pPr') ?? null;
 }
@@ -207,6 +234,110 @@ function findHeadingParagraph(body: XmlNode, section: AssemblySection): XmlNode 
   return paragraphs.find((p) => paragraphText(p).trim().toLowerCase() === normalized) ?? null;
 }
 
+/**
+ * Places figures into the template's reserved screenshot boxes.
+ *
+ * The box is a one-cell table with dashed borders; its text is the instruction
+ * (`[ TEMPELKAN SCREENSHOT: â€¦ ]` plus a small resolution hint). Filling it means:
+ *   1. drop the instruction paragraphs from the cell,
+ *   2. append the picture paragraph inside the same cell,
+ *   3. size the picture to the cell width so it cannot overflow the frame.
+ *
+ * The caption paragraph ("Gambar 1. â€¦") sits OUTSIDE the table in these templates,
+ * so it keeps its place automatically â€” which is why the caption and its picture were
+ * on different pages before.
+ *
+ * Figures that match no box are returned so the caller can append them as before.
+ */
+function fillScreenshotSlots(
+  body: XmlNode,
+  figures: AssemblyFigure[],
+  writer: { add: (figure: AssemblyFigure, options?: { maxWidthEmu?: number }) => XmlNode | null },
+  headingPara: XmlNode | null,
+): { filled: number; remaining: AssemblyFigure[] } {
+  if (figures.length === 0) return { filled: 0, remaining: figures };
+
+  // Only boxes AFTER this section's heading belong to it. Without this, the first
+  // section's figures could fill the last section's boxes.
+  const startIndex = headingPara ? body.children.indexOf(headingPara) : 0;
+  if (startIndex < 0) return { filled: 0, remaining: figures };
+
+  const slots: Array<{ node: XmlNode; slotText: string }> = [];
+  for (let index = startIndex; index < body.children.length; index += 1) {
+    const node = body.children[index]!;
+    if (node.tag !== 'w:tbl') continue;
+    const text = collectNodeText(node);
+    if (!isScreenshotSlotText(text)) continue;
+    slots.push({ node, slotText: text });
+  }
+  if (slots.length === 0) return { filled: 0, remaining: figures };
+
+  const candidates = figures
+    .filter((figure) => figure.documentId)
+    .map((figure) => ({ documentId: figure.documentId!, text: figure.text ?? '' }));
+  if (candidates.length === 0) return { filled: 0, remaining: figures };
+
+  const { matches } = matchFiguresToSlots(slots, candidates);
+  if (matches.length === 0) return { filled: 0, remaining: figures };
+
+  const filledIds = new Set(matches.map((match) => match.documentId));
+  let filled = 0;
+  for (const match of matches) {
+    const figure = figures.find((candidate) => candidate.documentId === match.documentId);
+    if (!figure) continue;
+
+    const cell = findCellOf(match.node);
+    if (!cell) continue;
+
+    // Reserve the cell's own width for the picture (dxa -> EMU: 1 dxa = 635 EMU),
+    // minus the cell margins the template set (200 twips each side).
+    const cellWidthDxa = cellWidthOf(cell) ?? 8504;
+    const maxWidthEmu = Math.max(914400, (cellWidthDxa - 400) * 635);
+
+    const imagePara = writer.add(figure, { maxWidthEmu });
+    if (!imagePara) continue;
+
+    // Remove the instruction paragraphs so the box shows the picture, not the prompt.
+    const keptChildren: XmlNode[] = [];
+    for (const child of cell.children) {
+      if (child.tag === 'w:tcPr') {
+        keptChildren.push(child);
+        continue;
+      }
+      if (child.tag === 'w:p' && isScreenshotSlotText(collectNodeText(child))) continue;
+      // The small "Pastikan screenshot diambilâ€¦" hint is also part of the prompt.
+      if (child.tag === 'w:p' && /pastikan\s+screenshot/i.test(collectNodeText(child))) continue;
+      keptChildren.push(child);
+    }
+    // A table cell must contain at least one paragraph; the image paragraph counts,
+    // but Word is happier with a trailing empty one.
+    cell.children = [...keptChildren, imagePara, createParagraph('')];
+    filled += 1;
+  }
+
+  return { filled, remaining: figures.filter((figure) => !figure.documentId || !filledIds.has(figure.documentId)) };
+}
+
+function collectNodeText(node: XmlNode): string {
+  if (node.tag === '#text') return node.text ?? '';
+  let out = '';
+  for (const child of node.children) out += collectNodeText(child);
+  return out;
+}
+
+function findCellOf(table: XmlNode): XmlNode | null {
+  const cells = findAll(table, 'w:tc');
+  return cells[0] ?? null;
+}
+
+function cellWidthOf(cell: XmlNode): number | null {
+  const props = findChild(cell, 'w:tcPr');
+  const width = props ? findChild(props, 'w:tcW') : null;
+  const value = width?.attrs['w:w'];
+  const parsed = value ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function buildContentParagraphs(content: string, headingPara: XmlNode | null): XmlNode[] {
   const pProps = headingPara ? cloneNode(paragraphPropsOf(headingPara) ?? { tag: 'w:pPr', attrs: {}, children: [] }) : null;
   if (pProps) {
@@ -217,7 +348,11 @@ function buildContentParagraphs(content: string, headingPara: XmlNode | null): X
       // keep an empty pPr out of the output
     }
   }
-  const rProps = headingPara ? runPropsOf(headingPara) : null;
+  // Body text must not inherit heading emphasis (bold, larger size, colour). This
+  // filters the run properties, so it must operate on a COPY â€” `runPropsOf` hands
+  // back the heading's live `<w:rPr>` and editing that in place stripped the
+  // heading's own formatting (see `clonedRunPropsOf`).
+  const rProps = headingPara ? clonedRunPropsOf(headingPara) : null;
   if (rProps) {
     rProps.children = rProps.children.filter((c) => c.tag !== 'w:b' && c.tag !== 'w:bCs' && c.tag !== 'w:color' && c.tag !== 'w:sz' && c.tag !== 'w:szCs');
   }
@@ -245,9 +380,9 @@ function buildContentParagraphs(content: string, headingPara: XmlNode | null): X
         flush();
         continue;
       }
-      if (/^([-*•]|\d+[.)])\s+/.test(trimmed)) {
+      if (/^([-*â€¢]|\d+[.)])\s+/.test(trimmed)) {
         flush();
-        current.push(trimmed.replace(/^[-*•]\s+/, '• '));
+        current.push(trimmed.replace(/^[-*â€¢]\s+/, 'â€¢ '));
       } else {
         current.push(trimmed);
       }
@@ -266,12 +401,18 @@ function buildContentParagraphs(content: string, headingPara: XmlNode | null): X
  * the section simply keeps its prose rather than producing a broken file.
  */
 function createFigureWriter(pkg: DocxPackage): {
-  add: (figure: AssemblyFigure) => XmlNode | null;
+  add: (figure: AssemblyFigure, options?: { maxWidthEmu?: number }) => XmlNode | null;
 } {
   const relsPath = 'word/_rels/document.xml.rels';
-  const relsXml = pkg.files[relsPath] ? xmlToString(pkg.files[relsPath]!) : null;
+  // These must MUTATE as figures are added. Writing `pkg.files[relsPath]` from a
+  // stale local string made each figure overwrite the previous relationship, so a
+  // 25-image report shipped one valid relationship and 24 dangling ones â€” Word
+  // treats a drawing whose r:embed resolves to nothing as corrupt, and LibreOffice
+  // silently drops it. The PDF then showed 2 of 25 pictures while the DOCX looked
+  // fine on inspection.
+  let relsXml = pkg.files[relsPath] ? xmlToString(pkg.files[relsPath]!) : null;
   const contentTypesPath = '[Content_Types].xml';
-  const contentTypesXml = pkg.files[contentTypesPath] ? xmlToString(pkg.files[contentTypesPath]!) : null;
+  let contentTypesXml = pkg.files[contentTypesPath] ? xmlToString(pkg.files[contentTypesPath]!) : null;
 
   // Continue numbering from whatever the template already contains.
   const existingMedia = Object.keys(pkg.files).filter((n) => n.startsWith('word/media/')).length;
@@ -285,7 +426,7 @@ function createFigureWriter(pkg: DocxPackage): {
   const addedExtensions = new Set<string>();
 
   return {
-    add(figure) {
+    add(figure, options) {
       if (!relsXml || !contentTypesXml) return null;
       if (figure.bytes.byteLength === 0) return null;
       const size = imagePixelSize(figure.bytes);
@@ -310,11 +451,12 @@ function createFigureWriter(pkg: DocxPackage): {
 
       const relationship =
         `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${fileName}"/>`;
-      pkg.files[relsPath] = stringToXml(
-        relsXml.includes('</Relationships>')
-          ? relsXml.replace('</Relationships>', `${relationship}</Relationships>`)
-          : relsXml,
-      );
+      // Append to the CURRENT rels text, not the text as it was before the previous
+      // figures added theirs â€” otherwise this write erases them.
+      relsXml = relsXml.includes('</Relationships>')
+        ? relsXml.replace('</Relationships>', `${relationship}</Relationships>`)
+        : relsXml;
+      pkg.files[relsPath] = stringToXml(relsXml);
 
       // <Default Extension="png" .../> is required or Word refuses the package.
       const mime =
@@ -322,11 +464,10 @@ function createFigureWriter(pkg: DocxPackage): {
       if (!addedExtensions.has(figure.extension) && !contentTypesXml.includes(`Extension="${figure.extension}"`)) {
         addedExtensions.add(figure.extension);
         const decl = `<Default Extension="${figure.extension}" ContentType="${mime}"/>`;
-        pkg.files[contentTypesPath] = stringToXml(
-          contentTypesXml.includes('<Types')
-            ? contentTypesXml.replace(/(<Types[^>]*>)/, `$1${decl}`)
-            : contentTypesXml,
-        );
+        contentTypesXml = contentTypesXml.includes('<Types')
+          ? contentTypesXml.replace(/(<Types[^>]*>)/, `$1${decl}`)
+          : contentTypesXml;
+        pkg.files[contentTypesPath] = stringToXml(contentTypesXml);
       }
 
       return createImageParagraph({
@@ -335,6 +476,7 @@ function createFigureWriter(pkg: DocxPackage): {
         name: fileName,
         widthPx: size.width,
         heightPx: size.height,
+        ...(options?.maxWidthEmu ? { maxWidthEmu: options.maxWidthEmu } : {}),
       });
     },
   };
@@ -357,6 +499,8 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
   let insertedParagraphs = 0;
   let tablesInserted = 0;
   let imagesInserted = 0;
+  /** Dashed template slots that received their picture. */
+  let tablesFilled = 0;
 
   // Figures are written as real media parts. Word needs three things to stay
   // consistent: the bytes under `word/media/`, a relationship in
@@ -423,9 +567,21 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
     }
     // Source images follow the table: the reader sees the original diagram, which
     // is what makes imperfect OCR harmless rather than misleading.
+    //
+    // But a template that RESERVES a slot for the picture must be honoured. Real
+    // campus templates wrap a dashed-border table cell around
+    // "[ TEMPELKAN SCREENSHOT: Diagram Topologi â€¦ ]", and appending the figure after
+    // the prose left that box empty while the picture floated elsewhere â€” the defect
+    // the user reported. Figures that match a slot go INSIDE it; only the leftovers
+    // are appended as before.
+    const sectionFigures = section.figures ?? [];
+    const slotResult = fillScreenshotSlots(body, sectionFigures, figureWriter, headingPara);
+    imagesInserted += slotResult.filled;
+    if (slotResult.filled > 0) tablesFilled += slotResult.filled;
+
     let imageAnchor = paragraphs.length > 0 ? paragraphs[paragraphs.length - 1]! : headingPara;
     let sectionImages = 0;
-    for (const figure of section.figures ?? []) {
+    for (const figure of slotResult.remaining) {
       const node = figureWriter.add(figure);
       if (!node) continue;
       insertAfter(body, imageAnchor, [node]);
@@ -433,7 +589,7 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
       sectionImages += 1;
       imagesInserted += 1;
     }
-    if (paragraphs.length === 0 && !section.table && sectionImages === 0) continue;
+    if (paragraphs.length === 0 && !section.table && sectionImages === 0 && slotResult.filled === 0) continue;
   }
 
   const outputXml = serializeXml([root]);

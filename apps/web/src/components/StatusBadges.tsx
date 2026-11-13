@@ -9,7 +9,8 @@ const TONES: Record<Tone, string> = {
   green: 'bg-emerald-50 text-emerald-700',
   amber: 'bg-amber-50 text-amber-800',
   red: 'bg-red-50 text-red-700',
-  purple: 'bg-violet-50 text-violet-700',
+  // Bubblegum pink is used for "secondary but notable" state, not for errors.
+  purple: 'bg-accent-50 text-accent-800',
 };
 
 export function Badge({ tone = 'neutral', children }: { tone?: Tone; children: ReactNode }) {

@@ -93,6 +93,16 @@ export class JobWorker {
   }
 
   private async claim(): Promise<{ id: string } | null> {
+    // A job whose payload names a `dependsOnJobId` may only start once that job
+    // has succeeded. The dependency was written into the payload but never read,
+    // so the PDF job was claimed in the same tick as the DOCX job it converts and
+    // failed immediately with "The source DOCX export is not ready" — which left
+    // every PDF artifact `pending` and made the preview fall back to stale pages.
+    //
+    // The dependency is resolved with a LEFT JOIN rather than an EXISTS subquery:
+    // `FOR UPDATE SKIP LOCKED` cannot lock rows when the same table is re-read
+    // through a correlated subquery, and the claim silently matched nothing —
+    // which looked exactly like "the dependency is not ready yet".
     const result = await this.db.execute<{ id: string }>(sql`
       update processing_jobs j
       set status = 'running',
@@ -101,10 +111,17 @@ export class JobWorker {
           started_at = coalesce(j.started_at, now()),
           updated_at = now()
       where j.id = (
-        select id from processing_jobs
-        where status = 'queued'
-        order by created_at asc
-        for update skip locked
+        select candidate.id
+        from processing_jobs candidate
+        left join processing_jobs dependency
+          on dependency.id::text = candidate.payload ->> 'dependsOnJobId'
+        where candidate.status = 'queued'
+          and (
+            candidate.payload ->> 'dependsOnJobId' is null
+            or dependency.status = 'succeeded'
+          )
+        order by candidate.created_at asc
+        for update of candidate skip locked
         limit 1
       )
       returning j.id
@@ -113,8 +130,7 @@ export class JobWorker {
     return row ? { id: row.id } : null;
   }
 
-  async recoverStaleJobs(staleAfterMs = 10 * 60 * 1000): Promise<void> {
-    const { JobService } = await import('../jobs/index.js');
+  async recoverStaleJobs(staleAfterMs = 10 * 60 * 1000): Promise<void> {    const { JobService } = await import('../jobs/index.js');
     const jobs = new JobService(this.db, this.services.config.JOB_MAX_ATTEMPTS);
     const result = await jobs.recoverStaleJobs(staleAfterMs);
     if (result.requeued || result.failed) {

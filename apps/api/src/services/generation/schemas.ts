@@ -39,6 +39,85 @@ function tryParse(text: string): { ok: true; value: unknown } | { ok: false; err
   }
 }
 
+/**
+ * Turns a model reply that is *actually* the section JSON into the body text.
+ *
+ * The "plain prose" retry asks the model to stop emitting JSON. Models sometimes
+ * ignore that and reply with the full envelope anyway
+ * (`{"section": "...", "body": "...", "warnings": [...]}`). That reply is long
+ * enough to pass a length check, so it was stored verbatim as the section body
+ * and exported into the finished document — three sections of a real report came
+ * out as raw JSON with `\n` escapes showing in the PDF.
+ *
+ * This extracts the human-readable part and refuses to return anything that still
+ * looks like a serialised object. It is deliberately conservative: if no `body`
+ * field can be recovered, the whole text is returned unchanged so the caller can
+ * apply its own length/quality checks.
+ */
+export function unwrapJsonBody(text: string): { body: string; unwrapped: boolean } {
+  const trimmed = text.trim();
+  // Only pay the parsing cost when the text plausibly is a JSON object.
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('```')) {
+    return { body: trimmed, unwrapped: false };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseModelJson(trimmed);
+  } catch {
+    // Starts with "{" but is not parseable JSON: it may simply be prose that
+    // begins with a brace. Leave it to the caller.
+    return { body: trimmed, unwrapped: false };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { body: trimmed, unwrapped: false };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  // Prefer the documented field, then the common near-misses models use.
+  for (const key of ['body', 'content', 'text', 'prose', 'sectionBody'] as const) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return { body: normaliseEscapes(value.trim()), unwrapped: true };
+    }
+  }
+  // A JSON object with no usable body: returning it would put braces in the
+  // report, so report failure via an empty string.
+  return { body: '', unwrapped: true };
+}
+
+/**
+ * Converts escaped `\n` inside a JSON string into real newlines.
+ *
+ * A model that double-encodes its reply leaves the two characters `\` and `n` in
+ * the text, which PDF export renders literally mid-sentence.
+ */
+export function normaliseEscapes(text: string): string {
+  return text
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"');
+}
+
+/**
+ * True when the text is a serialised object rather than prose.
+ *
+ * Used as a final guard before saving: a body that still parses as a JSON object
+ * with a `body`-like key must never reach the document.
+ */
+export function looksLikeSerialisedSection(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return false;
+  if (!/"?(body|section|content|warnings)"?\s*:/.test(trimmed)) return false;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
 export const sectionTableZod = z
   .object({
     columns: z.array(z.string().max(200)).min(1).max(20),
@@ -47,16 +126,23 @@ export const sectionTableZod = z
   })
   .strict();
 
-export const sectionDraftZod = z
-  .object({
-    body: z.string().min(1, 'The section body is empty'),
-    // Optional: only present when the section is about a table.
-    table: sectionTableZod.nullish(),
-    citedChunkIds: z.array(z.string()).max(200).default([]),
-    warnings: z.array(z.string().max(1000)).max(30).default([]),
-    placeholders: z.array(z.string().max(300)).max(30).default([]),
-  })
-  .strict();
+/**
+ * A section draft as the model returns it.
+ *
+ * Deliberately NOT `.strict()`. A model that adds one harmless extra key
+ * (`"title"`, `"heading"`, `"notes"`) used to fail the whole parse, and the section
+ * was abandoned with "The model did not return a valid section payload" — which is
+ * how a 44-section run ended with a silently empty 5.2 and no explanation stored.
+ * Unknown keys are stripped; only the fields we actually use are validated.
+ */
+export const sectionDraftZod = z.object({
+  body: z.string().trim().min(1, 'The section body is empty'),
+  // Optional: only present when the section is about a table.
+  table: sectionTableZod.nullish(),
+  citedChunkIds: z.array(z.string()).max(200).default([]),
+  warnings: z.array(z.string().max(1000)).max(30).default([]),
+  placeholders: z.array(z.string().max(300)).max(30).default([]),
+});
 
 export const mappingZod = z.object({
   sections: z

@@ -317,7 +317,14 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
         await markStage('done', 100);
         await db
           .update(processingJobs)
-          .set({ result: { exportId: payload.exportId, fidelity: result.fidelity as unknown as Record<string, unknown> } })
+          .set({
+            result: {
+              exportId: payload.exportId,
+              fidelity: result.fidelity as unknown as Record<string, unknown>,
+              warnings: result.warnings,
+              missingCoverFields: result.missingCoverFields,
+            },
+          })
           .where(eq(processingJobs.id, jobId));
         break;
       }
@@ -391,6 +398,19 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
         .update(projects)
         .set({ status: 'failed', updatedAt: new Date() })
         .where(and(eq(projects.id, job.projectId), eq(projects.userId, job.userId)));
+    }
+    if (job.kind === 'generate_section' && !willRetry) {
+      // The single-section path used to leave the section empty with no reason
+      // stored, exactly like the reported 5.2. Record the reason on the section so
+      // the outline and the export both explain it.
+      const payload = job.payload as { sectionId?: string };
+      if (payload.sectionId) {
+        try {
+          await services.generation.recordDraftFailure(ctx, job.projectId, payload.sectionId, message);
+        } catch {
+          // Never mask the original job failure.
+        }
+      }
     }
     logger.error('Job failed', { jobId, kind: job.kind, code, attempts });
     if (!willRetry) throw error;

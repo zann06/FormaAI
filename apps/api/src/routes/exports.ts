@@ -90,9 +90,18 @@ export async function registerExportRoutes(instance: FastifyInstance, ctx: Serve
         });
       }
 
+      // Optional page window: the workspace asks for the first pages so a page
+      // appears quickly, then fetches the rest while the user reads. Rasterising
+      // a 45-page report in one request took ~20 s, which made "realtime" useless.
+      const query = request.query as { from?: string; to?: string };
+      const fromPage = Number.parseInt(String(query.from ?? ''), 10);
+      const toPage = Number.parseInt(String(query.to ?? ''), 10);
+
       try {
         const preview = await exportsService.renderPreview(user, projectId, {
           maxPages: PREVIEW_LIMITS.maxPages,
+          fromPage: Number.isFinite(fromPage) && fromPage > 0 ? fromPage : undefined,
+          toPage: Number.isFinite(toPage) && toPage > 0 ? toPage : undefined,
         });
         return reply.send({
           pages: preview.pages.map((page) => ({
@@ -104,7 +113,9 @@ export async function registerExportRoutes(instance: FastifyInstance, ctx: Serve
           })),
           pageCount: preview.pageCount,
           totalPages: preview.totalPages,
-          truncated: preview.totalPages > preview.pageCount,
+          firstPage: preview.firstPage ?? 1,
+          // Only true when the *document* has more pages than the cap allows.
+          truncated: preview.totalPages > Math.min(preview.totalPages, PREVIEW_LIMITS.maxPages),
           renderedAt: preview.renderedAt,
         });
       } catch (error) {

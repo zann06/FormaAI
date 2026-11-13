@@ -5,6 +5,7 @@ import type { AuthContext } from '../auth/index.js';
 import {
   documents,
   exportArtifacts,
+  extractedChunks,
   projects,
   reportSections,
   reportVersions,
@@ -20,7 +21,7 @@ import { convertDocxToPdf, isPdfConverterConfigured, validatePdf } from './pdf.j
 import { renderDocxPreview } from './preview.js';
 import { buildStorageKey } from '../storage/index.js';
 import { safeFilename } from '@formaai/shared';
-import { classifySection, shouldKeepTemplateText, isOnlyGapMarkers } from '@formaai/shared';
+import { classifySection, shouldKeepTemplateText, isOnlyGapMarkers, isChapterDivider } from '@formaai/shared';
 
 export interface AssemblyInput {
   ctx: AuthContext;
@@ -69,6 +70,31 @@ export function imageExtensionFor(
 }
 
 /**
+ * The literal fill-in prompts shipped by student-report templates.
+ *
+ * Kept next to `identityReplacements` so the strings that are replaced and the
+ * strings whose absence is reported can never drift apart.
+ */
+export const COVER_PROMPTS = [
+  { field: 'Nama', find: '[ Tuliskan Nama Lengkap Anda ]' },
+  { field: 'NIM', find: '[ Tuliskan NIM Anda ]' },
+  { field: 'Kelas', find: '[ RA / RB / RC / RD ]' },
+  { field: 'Tanggal', find: '[ Tuliskan Tanggal Pengumpulan ]' },
+] as const;
+
+/**
+ * Names the cover fields still unfilled in an assembled document.
+ *
+ * Export used to leave these prompts in the file silently, so a finished report
+ * arrived with `[ Tuliskan Nama Lengkap Anda ]` on the cover and the assistant never
+ * asked for the missing details. This is the check that turns that silence into a
+ * question the chat can ask.
+ */
+export function missingCoverFields(documentText: string): string[] {
+  return COVER_PROMPTS.filter((prompt) => documentText.includes(prompt.find)).map((prompt) => prompt.field);
+}
+
+/**
  * Turns the identity the user supplied into literal template replacements.
  *
  * Student report templates ship with fill-in prompts (`[ Tuliskan Nama Lengkap
@@ -89,42 +115,19 @@ export function identityReplacements(instructions: string | null): Array<{ find:
   const add = (find: string, value: string | undefined) => {
     if (value) replacements.push({ find, replace: value });
   };
-  add('[ Tuliskan Nama Lengkap Anda ]', fields.nama ?? fields.name);
-  add('[ Tuliskan NIM Anda ]', fields.nim);
-  add('[ RA / RB / RC / RD ]', fields.kelas ?? fields.class);
-  add('[ Tuliskan Tanggal Pengumpulan ]', fields.tanggal ?? fields.date);
+  add(COVER_PROMPTS[0].find, fields.nama ?? fields.name);
+  add(COVER_PROMPTS[1].find, fields.nim);
+  add(COVER_PROMPTS[2].find, fields.kelas ?? fields.class);
+  add(COVER_PROMPTS[3].find, fields.tanggal ?? fields.date);
   return replacements;
 }
 
 export class ExportService {
-  /**
-   * In-memory page-preview cache, keyed by the hash of the assembled DOCX.
-   *
-   * Rendering takes ~10 s because LibreOffice has to start and lay the document
-   * out. Without a cache every visit to the Preview tab would pay that cost again.
-   * Keyed by content, so editing a section produces a different DOCX and therefore
-   * a fresh render — the cache can never serve stale pages.
-   */
-  private readonly previewCache = new Map<string, Awaited<ReturnType<typeof renderDocxPreview>>>();
-  private static readonly PREVIEW_CACHE_LIMIT = 12;
-
   constructor(
     private readonly db: Database,
     private readonly storage: StorageAdapter,
     private readonly config: AppConfig,
   ) {}
-
-  private readonly previewCacheAdapter = {
-    get: async (key: string) => this.previewCache.get(key) ?? null,
-    set: async (key: string, value: Awaited<ReturnType<typeof renderDocxPreview>>) => {
-      // Bounded LRU-ish eviction: previews are large (hundreds of KB per page).
-      if (this.previewCache.size >= ExportService.PREVIEW_CACHE_LIMIT) {
-        const oldest = this.previewCache.keys().next().value;
-        if (oldest) this.previewCache.delete(oldest);
-      }
-      this.previewCache.set(key, value);
-    },
-  };
 
   async assertProject(ctx: AuthContext, projectId: string) {
     const [project] = await this.db
@@ -174,7 +177,12 @@ export class ExportService {
     // material, and refusing to export left 40 finished sections trapped behind
     // them. The placeholder stays visible in the document so the gap is obvious.
     const firstSortOrder = emptyRequired.reduce((min, row) => Math.min(min, row.sortOrder), Number.MAX_SAFE_INTEGER);
-    const emptyHeadings = emptyRequired
+    // A chapter divider ("BAB I: PENDAHULUAN") legitimately has no body: the chapter
+    // number is a label above 1.1, 1.2, 1.3 and the document reads correctly without
+    // prose under it. Treating it as a missing section blocked the export and told the
+    // user their finished report was incomplete.
+    const blocking = emptyRequired.filter((section) => !isChapterDivider(section.heading));
+    const emptyHeadings = blocking
       .filter((section) => !isPlaceholderOnly(section.content))
       // Cover lines and rubric sheets are intentionally left with no stored body:
       // their text already exists in the template, so "empty" here is correct and
@@ -239,7 +247,10 @@ export class ExportService {
    * Builds the DOCX from a copy of the original template and stores it.
    * Only DOM-level text insertion is performed; everything else is byte-copied.
    */
-  async assemble(ctx: AuthContext, exportId: string): Promise<{ artifactId: string; fidelity: unknown }> {
+  async assemble(
+    ctx: AuthContext,
+    exportId: string,
+  ): Promise<{ artifactId: string; fidelity: unknown; warnings: string[]; missingCoverFields: string[] }> {
     const [artifact] = await this.db
       .select()
       .from(exportArtifacts)
@@ -318,6 +329,32 @@ export class ExportService {
     const stylesXml = reopened.files['word/styles.xml'] ? xmlToString(reopened.files['word/styles.xml']!) : null;
     const verification = analyzeDocumentXml(docXml, stylesXml, null);
     const warnings = [...result.fidelity.warnings];
+    // Chapter dividers ("BAB I: PENDAHULUAN") carry no body of their own: the
+    // chapter number labels 1.1, 1.2, 1.3 and the document reads correctly without
+    // prose under it. Recorded as a note so the outline explains the empty row
+    // instead of looking like a silent failure.
+    const emptyDividers = rows
+      .filter((row) => !row.excluded && !(row.content ?? '').trim() && isChapterDivider(row.heading))
+      .map((row) => row.heading);
+    if (emptyDividers.length > 0) {
+      warnings.push(
+        `Chapter dividers with no body of their own (normal for this template): ${emptyDividers
+          .slice(0, 6)
+          .join(', ')}.`,
+      );
+    }
+
+    // A blank cover is a question, not a failure: the file is valid and complete,
+    // but the assistant must ask for the identity instead of shipping placeholders
+    // without a word. The chat reads this from the export job and asks the user.
+    const coverStillMissing = missingCoverFields(docXml.replace(/<[^>]+>/g, ''));
+    if (coverStillMissing.length > 0) {
+      warnings.push(
+        `Cover details are still blank in the exported document: ${coverStillMissing.join(
+          ', ',
+        )}. Ask the user for them and rebuild rather than inventing values.`,
+      );
+    }
     if (verification.headings.length !== result.fidelity.templateHeadings) {
       warnings.push('Structural verification failed: heading count changed.');
     }
@@ -336,7 +373,7 @@ export class ExportService {
       .where(and(eq(exportArtifacts.id, exportId), eq(exportArtifacts.userId, ctx.userId)))
       .returning();
 
-    return { artifactId: updated!.id, fidelity: result.fidelity };
+    return { artifactId: updated!.id, fidelity: result.fidelity, warnings, missingCoverFields: coverStillMissing };
   }
 
   /**
@@ -350,7 +387,7 @@ export class ExportService {
   async renderPreview(
     ctx: AuthContext,
     projectId: string,
-    options: { maxPages?: number } = {},
+    options: { maxPages?: number; fromPage?: number; toPage?: number } = {},
   ): Promise<Awaited<ReturnType<typeof renderDocxPreview>>> {
     const project = await this.assertProject(ctx, projectId);
 
@@ -401,24 +438,18 @@ export class ExportService {
       })),
     });
 
+    // No cache: the preview must always show the current document.
+    //
+    // An in-memory cache keyed on the assembled inputs used to sit here, and it
+    // served stale pages whenever a section changed through a path that did not
+    // update the key (a regenerated section, an edited instruction, a filled
+    // screenshot box). The user saw an old document in Preview while the download
+    // was correct. Paying ~10 s to re-render is the right trade: a wrong preview is
+    // a broken product, a slow one is merely slow.
     return renderDocxPreview(assembled.buffer, this.config, {
       maxPages: options.maxPages,
-      // Key on the *inputs*, not the output bytes: assembling stamps the current
-      // date into the document, so identical content still yields different bytes
-      // and a byte hash would always miss.
-      cacheKey: sha256Hex(
-        JSON.stringify({
-          title: project.title ?? '',
-          template: template.storageKey,
-          sections: rows.map((row) => [
-            row.sectionId,
-            row.excluded,
-            row.content ?? '',
-            (row.figures ?? []).map((figure) => figure.documentId),
-          ]),
-        }),
-      ),
-      cache: this.previewCacheAdapter,
+      fromPage: options.fromPage,
+      toPage: options.toPage,
     });
   }
 
@@ -434,7 +465,18 @@ export class ExportService {
       .from(exportArtifacts)
       .where(and(eq(exportArtifacts.id, docxExportId), eq(exportArtifacts.userId, ctx.userId)))
       .limit(1);
-    if (!docxArtifact?.storageKey) throw conflict('The source DOCX export is not ready');
+    if (!docxArtifact) throw notFound('The source DOCX export not found');
+    if (docxArtifact.status === 'failed') {
+      throw conflict(
+        `The DOCX could not be built, so there is nothing to convert to PDF: ${docxArtifact.errorMessage ?? 'unknown reason'}`,
+      );
+    }
+    if (!docxArtifact.storageKey) {
+      // Only reachable if the worker started this job before the DOCX finished. The
+      // claim query now enforces that ordering, so surfacing it plainly beats a
+      // generic conflict the user cannot act on.
+      throw conflict('The DOCX export is still being written; try again in a moment.');
+    }
 
     const docxBytes = await this.storage.get(docxArtifact.storageKey);
     let pdfBytes: Uint8Array;
@@ -597,12 +639,37 @@ export class ExportService {
       }
     }
 
+    // An image has no text of its own, so what it shows was OCR'd into chunks at
+    // ingestion. Templates reserve a dashed box per screenshot with an instruction
+    // such as "TEMPELKAN SCREENSHOT: Diagram Topologi"; choosing WHICH picture belongs
+    // in which box means comparing that instruction with the picture's OCR text. The
+    // figure therefore has to carry its documentId and its OCR text down to the
+    // assembler, otherwise every box would stay empty and the pictures would be
+    // appended wherever the prose ended.
+    const ocrByDocument = new Map<string, string>();
+    for (const doc of docs) {
+      const chunks = await this.db
+        .select({ text: extractedChunks.text, ordinal: extractedChunks.ordinal })
+        .from(extractedChunks)
+        .where(and(eq(extractedChunks.userId, ctx.userId), eq(extractedChunks.documentId, doc.id)))
+        .orderBy(extractedChunks.ordinal);
+      if (chunks.length > 0) {
+        ocrByDocument.set(doc.id, chunks.map((chunk) => chunk.text).join(' ').slice(0, 4000));
+      }
+    }
+
     for (const row of rows) {
       const figures: AssemblyFigure[] = [];
       for (const figure of row.figures ?? []) {
         const asset = loaded.get(figure.documentId);
         if (!asset) continue;
-        figures.push({ bytes: asset.bytes, extension: asset.extension, caption: figure.caption ?? null });
+        figures.push({
+          bytes: asset.bytes,
+          extension: asset.extension,
+          caption: figure.caption ?? null,
+          documentId: figure.documentId,
+          text: ocrByDocument.get(figure.documentId) ?? null,
+        });
       }
       if (figures.length > 0) bySection.set(row.sectionId, figures);
     }

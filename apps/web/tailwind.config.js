@@ -4,30 +4,50 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Minimal, professional palette. `brand` is the single accent colour.
+        /**
+         * FormaAI brand identity.
+         *
+         * The palette is deliberately two colours and one neutral: Deep Blue
+         * (#09318D) carries structure and trust, Bubblegum Pink (#FD91CC) is the
+         * single accent used for emphasis and hover, and Pure White is the only
+         * surface colour. Anything else lives in `ink`, which is a tinted grey so
+         * it stays in the blue family instead of looking dirty next to it.
+         */
         brand: {
-          50: '#eef4ff',
-          100: '#dbe6fe',
-          200: '#bfd3fe',
-          300: '#93b4fd',
-          400: '#608bfa',
-          500: '#3b66f6',
-          600: '#2547eb',
-          700: '#1d36d8',
-          800: '#1e2fae',
-          900: '#1e2d89',
+          50: '#eef2fc',
+          100: '#d6e0f8',
+          200: '#adc2f0',
+          300: '#7f9fe6',
+          400: '#4b74d8',
+          500: '#1f51c0',
+          600: '#09318d', // Deep blue — the primary colour
+          700: '#082a78',
+          800: '#072261',
+          900: '#051a4a',
+        },
+        accent: {
+          50: '#fff2f9',
+          100: '#ffe3f2',
+          200: '#fecbe7',
+          300: '#fd91cc', // Bubblegum pink — the only accent
+          400: '#fc74be',
+          500: '#f955ad',
+          600: '#e63b94',
+          700: '#c02777',
+          800: '#94215e',
+          900: '#6d1a46',
         },
         ink: {
-          50: '#f7f8fa',
-          100: '#eceef2',
-          200: '#d5dae2',
-          300: '#b0b9c8',
-          400: '#8391a8',
-          500: '#64728c',
-          600: '#4e5a72',
-          700: '#40495c',
-          800: '#373e4d',
-          900: '#313743',
+          50: '#f6f8fc',
+          100: '#eaeef6',
+          200: '#d5dcea',
+          300: '#b0bbd0',
+          400: '#7f8ca8',
+          500: '#5c6982',
+          600: '#47536a',
+          700: '#374257',
+          800: '#2a3346',
+          900: '#1b2233',
         },
       },
       fontFamily: {
@@ -36,6 +56,49 @@ export default {
       },
       maxWidth: {
         reading: '46rem',
+      },
+      backgroundImage: {
+        /** The hero wash: deep blue sinking into a lighter centre, as in the brand board. */
+        'brand-hero': 'radial-gradient(120% 90% at 50% 0%, #1a52c9 0%, #09318d 45%, #051a4a 100%)',
+        'brand-glow': 'radial-gradient(60% 60% at 50% 40%, rgba(253,145,204,0.35) 0%, rgba(253,145,204,0) 70%)',
+        'brand-line': 'linear-gradient(90deg, #09318d 0%, #fd91cc 100%)',
+      },
+      boxShadow: {
+        // A soft, blue-tinted lift so cards never look flat grey.
+        card: '0 1px 2px rgba(9,49,141,0.06), 0 8px 24px -12px rgba(9,49,141,0.18)',
+        lift: '0 2px 4px rgba(9,49,141,0.08), 0 18px 40px -18px rgba(9,49,141,0.28)',
+        accent: '0 8px 24px -10px rgba(253,145,204,0.75)',
+      },
+      keyframes: {
+        'fade-up': {
+          '0%': { opacity: '0', transform: 'translateY(10px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        'fade-in': {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        'scale-in': {
+          '0%': { opacity: '0', transform: 'scale(0.96)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
+        shimmer: {
+          '100%': { transform: 'translateX(100%)' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-6px)' },
+        },
+      },
+      animation: {
+        'fade-up': 'fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both',
+        'fade-in': 'fade-in 0.3s ease-out both',
+        'scale-in': 'scale-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) both',
+        float: 'float 6s ease-in-out infinite',
+      },
+      transitionTimingFunction: {
+        // The house easing: quick start, gentle settle.
+        brand: 'cubic-bezier(0.16, 1, 0.3, 1)',
       },
     },
   },

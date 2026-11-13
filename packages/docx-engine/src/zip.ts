@@ -14,6 +14,15 @@ export interface ZipLimits {
   maxCompressionRatio: number;
 }
 
+/**
+ * Timestamp written into every generated DOCX.
+ *
+ * Fixed so that assembling the same content twice yields the same bytes. See
+ * `writeDocxPackage` for why that matters (reproducible exports, and a preview
+ * cache that can key on the document hash).
+ */
+const DETERMINISTIC_MTIME = new Date(Date.UTC(2024, 0, 1, 0, 0, 0));
+
 export const DEFAULT_ZIP_LIMITS: ZipLimits = {
   maxEntries: 5000,
   maxTotalUncompressedBytes: 512 * 1024 * 1024,
@@ -75,7 +84,14 @@ export function writeDocxPackage(pkg: DocxPackage, original?: Uint8Array): Uint8
     zippable[name] = pkg.files[name]!;
   }
   // `[Content_Types].xml` must be the first entry for maximum compatibility.
-  return zipSync(zippable, { level: 6, mtime: original ? new Date() : new Date() });
+  //
+  // The mtime is fixed rather than `new Date()`. Writing the wall clock made two
+  // assemblies of *identical* content produce different bytes, which defeated the
+  // preview's converted-PDF cache (keyed on a hash of the DOCX) and meant the same
+  // report could never be reproduced byte-for-byte. A stable timestamp is the
+  // normal choice for generated archives: Word does not care, and the file now
+  // only changes when the report does.
+  return zipSync(zippable, { level: 6, mtime: DETERMINISTIC_MTIME });
 }
 
 export const decoder = new TextDecoder('utf-8');

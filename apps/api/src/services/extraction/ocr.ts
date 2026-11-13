@@ -67,8 +67,53 @@ export async function runOcr(
   const payload = normalized ?? image;
   const effectiveFormat: OcrImageFormat = normalized ? 'png' : format;
 
-  if (tesseractBin) return runTesseract(tesseractBin, payload, nameHint, effectiveFormat);
-  return runHttpOcr(endpoint as string, payload, nameHint, effectiveFormat);
+  if (endpoint) return runHttpOcr(endpoint, payload, nameHint, effectiveFormat);
+  const bin = tesseractBin as string;
+
+  // A single pass with Tesseract's default ("a page of text") is the wrong model
+  // for a screenshot: a network diagram's labels are sparse and scattered, and the
+  // default page-segmentation returns nothing at all. Try the modes that suit that
+  // shape of image, at an upscaled resolution, and keep the pass that yielded the
+  // most words. The first pass is still the default so ordinary documents behave
+  // exactly as before.
+  const attempts: Array<{ psm?: number; scale: number }> = [
+    { scale: 1 },
+    { psm: 11, scale: 1 },
+    { psm: 11, scale: 3 },
+    { psm: 12, scale: 3 },
+    { psm: 6, scale: 3 },
+  ];
+
+  let best: string | null = null;
+  let bestWords = 0;
+  for (const attempt of attempts) {
+    let input = payload;
+    if (attempt.scale > 1) {
+      const scaled = await upscaleImageForOcr(payload, attempt.scale);
+      if (!scaled) break;
+      input = scaled;
+    }
+    let text: string | null = null;
+    try {
+      text = await runTesseract(bin, input, nameHint, 'png', attempt.psm);
+    } catch {
+      continue;
+    }
+    const words = wordCount(text ?? '');
+    if (words > bestWords) {
+      bestWords = words;
+      best = text;
+    }
+    // A dense page of prose is already handled correctly; stop early rather than
+    // spending four more Tesseract runs on every ordinary document.
+    if (attempt.scale === 1 && !attempt.psm && words >= 20) break;
+  }
+  return best;
+}
+
+/** Counts word-like tokens so competing OCR passes can be compared. */
+function wordCount(text: string): number {
+  return (text.match(/[A-Za-z0-9][A-Za-z0-9/._-]*/g) ?? []).length;
 }
 
 /**
@@ -76,6 +121,25 @@ export async function runOcr(
  * Returns null when the module is unavailable or the bytes are not decodable.
  */
 export async function normalizeImageForOcr(image: Uint8Array): Promise<Uint8Array | null> {
+  return reencode(image, 1);
+}
+
+/**
+ * Scales the image up before OCR, which is what makes diagram labels readable.
+ *
+ * Labels in a screenshot are often ~10px tall, and Tesseract's models are trained
+ * on roughly 30px glyphs; at 1x it returns nothing at all for a network topology.
+ * Scaling with smoothing (not nearest-neighbour) gives the recogniser the glyph
+ * shapes it expects. Capped so a large photo does not blow up memory.
+ */
+export async function upscaleImageForOcr(
+  image: Uint8Array,
+  factor: number,
+): Promise<Uint8Array | null> {
+  return reencode(image, factor);
+}
+
+async function reencode(image: Uint8Array, scale: number): Promise<Uint8Array | null> {
   try {
     const canvasModule = (await import(/* @vite-ignore */ '@napi-rs/canvas').catch(() => null)) as {
       loadImage: (data: Uint8Array) => Promise<{
@@ -90,18 +154,31 @@ export async function normalizeImageForOcr(image: Uint8Array): Promise<Uint8Arra
     if (!canvasModule) return null;
 
     const decoded = await canvasModule.loadImage(image);
-    const width = Math.max(1, Math.round(decoded.width));
-    const height = Math.max(1, Math.round(decoded.height));
+    const baseWidth = Math.max(1, Math.round(decoded.width));
+    const baseHeight = Math.max(1, Math.round(decoded.height));
+    // Keep the upscaled canvas within a sane pixel budget (~40 MP).
+    const maxPixels = 40_000_000;
+    let effective = Math.max(1, scale);
+    while (baseWidth * effective * baseHeight * effective > maxPixels && effective > 1) {
+      effective -= 1;
+    }
+    const width = Math.max(1, Math.round(baseWidth * effective));
+    const height = Math.max(1, Math.round(baseHeight * effective));
     const canvas = canvasModule.createCanvas(width, height);
     const context = canvas.getContext('2d') as {
       fillStyle: string;
       fillRect: (x: number, y: number, w: number, h: number) => void;
-      drawImage: (img: unknown, x: number, y: number) => void;
+      drawImage: (img: unknown, x: number, y: number, w: number, h: number) => void;
+      imageSmoothingEnabled: boolean;
+      imageSmoothingQuality: string;
     };
     // Composite onto white so transparent PNG/WEBP/GIF do not OCR as black.
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, width, height);
-    context.drawImage(decoded, 0, 0);
+    // Smooth interpolation helps the recogniser far more than blocky pixels.
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(decoded, 0, 0, width, height);
     return new Uint8Array(canvas.toBuffer('image/png'));
   } catch {
     return null;
@@ -113,14 +190,17 @@ async function runTesseract(
   image: Uint8Array,
   nameHint: string,
   format: OcrImageFormat,
+  psm?: number,
 ): Promise<string | null> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'formaai-ocr-'));
   const extension = EXTENSION_BY_FORMAT[format];
   const file = path.join(dir, `${nameHint.replace(/[^a-z0-9-]/gi, '_')}.${extension}`);
   try {
     await fs.writeFile(file, image);
+    const args = [file, 'stdout', '-l', process.env.OCR_LANG ?? 'eng+ind'];
+    if (psm !== undefined) args.push('--psm', String(psm));
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(bin, [file, 'stdout', '-l', process.env.OCR_LANG ?? 'eng+ind'], {
+      const child = spawn(bin, args, {
         timeout: 60_000,
         windowsHide: true,
       });

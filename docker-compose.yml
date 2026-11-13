@@ -57,6 +57,10 @@ services:
       STORAGE_DIR: /app/data/storage
       LIBREOFFICE_BIN: soffice
       MAX_FILE_MB: ${MAX_FILE_MB:-25}
+      # Hard ceiling on AI requests per user per calendar day (UTC). This is a
+      # cost guard, not a provider limit, so it is configurable: raise it when a
+      # legitimate report needs more calls than a single day allows.
+      DAILY_AI_REQUEST_QUOTA: ${DAILY_AI_REQUEST_QUOTA:-500}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - apidata:/app/data

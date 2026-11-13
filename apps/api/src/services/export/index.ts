@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Database } from '../../db/client.js';
 import type { AppConfig } from '../../config.js';
 import type { AuthContext } from '../auth/index.js';
@@ -13,13 +13,14 @@ import {
 import { AppError, conflict, notFound } from '../../lib/errors.js';
 import type { StorageAdapter } from '../storage/index.js';
 import { assembleDocx, readDocxPackage, xmlToString } from '@formaai/docx-engine';
+import type { AssemblyFigure } from '@formaai/docx-engine';
 import { analyzeDocumentXml } from '@formaai/docx-engine';
 import { sha256Hex } from '../../lib/crypto.js';
 import { convertDocxToPdf, isPdfConverterConfigured, validatePdf } from './pdf.js';
 import { renderDocxPreview } from './preview.js';
 import { buildStorageKey } from '../storage/index.js';
 import { safeFilename } from '@formaai/shared';
-import { classifySection, shouldKeepTemplateText } from '@formaai/shared';
+import { classifySection, shouldKeepTemplateText, isOnlyGapMarkers } from '@formaai/shared';
 
 export interface AssemblyInput {
   ctx: AuthContext;
@@ -28,17 +29,71 @@ export interface AssemblyInput {
 }
 
 /**
- * True when the stored content is nothing but a "[MISSING: ...]" marker.
+ * True when the stored content is nothing but a gap marker.
  *
  * Generation writes such a marker when no evidence could be mapped, so that the
  * gap is visible instead of inventing text. Treating that marker as "empty" for
  * the required-section check keeps a handful of unsupported sections (cover
  * pages, appendices) from blocking an otherwise finished report.
+ *
+ * Both marker languages are recognised, because a report written in Indonesian
+ * carries `[PERLU DICEK: …]` and would otherwise look finished while still holding
+ * an unfilled hole.
  */
 export function isPlaceholderOnly(content: string | null | undefined): boolean {
   if (!content) return false;
-  const stripped = content.replace(/\[MISSING:[^\]]*\]/gi, '').trim();
-  return stripped.length === 0 && /\[MISSING:/i.test(content);
+  return isOnlyGapMarkers(content);
+}
+
+/**
+ * Maps a stored image's MIME type (or its key's extension) to the media
+ * extension used inside the DOCX package.
+ *
+ * Word only accepts PNG, JPEG and GIF here as plain `<Default>` content types;
+ * anything else (WEBP, TIFF, BMP) would need a converter we do not ship, so those
+ * return null and the section simply keeps its prose.
+ */
+export function imageExtensionFor(
+  mimeType: string | null | undefined,
+  storageKey: string,
+): 'png' | 'jpeg' | 'gif' | null {
+  const mime = (mimeType ?? '').toLowerCase();
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpeg';
+  if (mime === 'image/gif') return 'gif';
+  const key = storageKey.toLowerCase();
+  if (key.endsWith('.png')) return 'png';
+  if (key.endsWith('.jpg') || key.endsWith('.jpeg')) return 'jpeg';
+  if (key.endsWith('.gif')) return 'gif';
+  return null;
+}
+
+/**
+ * Turns the identity the user supplied into literal template replacements.
+ *
+ * Student report templates ship with fill-in prompts (`[ Tuliskan Nama Lengkap
+ * Anda ]`) instead of data fields, so the cover stays blank unless those exact
+ * strings are replaced. `instructions` is where the identity is kept as
+ * `Nama: …`, `NIM: …`, `Kelas: …` lines; anything else in there is ordinary
+ * guidance and is left alone.
+ */
+export function identityReplacements(instructions: string | null): Array<{ find: string; replace: string }> {
+  if (!instructions) return [];
+  const fields: Record<string, string> = {};
+  for (const line of instructions.split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z ]+?)\s*:\s*(.+?)\s*$/.exec(line);
+    if (match) fields[match[1]!.trim().toLowerCase()] = match[2]!.trim();
+  }
+
+  const replacements: Array<{ find: string; replace: string }> = [];
+  const add = (find: string, value: string | undefined) => {
+    if (value) replacements.push({ find, replace: value });
+  };
+  add('[ Tuliskan Nama Lengkap Anda ]', fields.nama ?? fields.name);
+  add('[ Tuliskan NIM Anda ]', fields.nim);
+  add('[ RA / RB / RC / RD ]', fields.kelas ?? fields.class);
+  add('[ Tuliskan Tanggal Pengumpulan ]', fields.tanggal ?? fields.date);
+  return replacements;
 }
 
 export class ExportService {
@@ -218,6 +273,7 @@ export class ExportService {
         content: reportSections.content,
         status: reportSections.status,
         tableData: reportSections.tableData,
+        figures: reportSections.figures,
       })
       .from(templateSections)
       .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
@@ -231,12 +287,14 @@ export class ExportService {
       .limit(1);
 
     const templateBytes = await this.storage.get(template.storageKey);
+    const figures = await this.loadFigures(ctx, rows);
     const result = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project?.title ?? '',
         report_type: project?.reportType ?? '',
         generated_date: new Date().toISOString().slice(0, 10),
       },
+      textReplacements: identityReplacements(project?.instructions ?? null),
       sections: rows.map((row) => ({
         sectionId: row.sectionId,
         headingText: row.heading,
@@ -245,6 +303,7 @@ export class ExportService {
         placeholder: row.placeholder,
         content: row.content ?? '',
         table: row.tableData ?? null,
+        figures: figures.get(row.sectionId) ?? [],
         skip: row.excluded,
       })),
     });
@@ -314,6 +373,7 @@ export class ExportService {
         excluded: templateSections.excluded,
         content: reportSections.content,
         tableData: reportSections.tableData,
+        figures: reportSections.figures,
       })
       .from(templateSections)
       .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
@@ -321,6 +381,7 @@ export class ExportService {
       .orderBy(templateSections.sortOrder);
 
     const templateBytes = await this.storage.get(template.storageKey);
+    const figures = await this.loadFigures(ctx, rows);
     const assembled = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project.title ?? '',
@@ -335,6 +396,7 @@ export class ExportService {
         placeholder: row.placeholder,
         content: row.content ?? '',
         table: row.tableData ?? null,
+        figures: figures.get(row.sectionId) ?? [],
         skip: row.excluded,
       })),
     });
@@ -348,7 +410,12 @@ export class ExportService {
         JSON.stringify({
           title: project.title ?? '',
           template: template.storageKey,
-          sections: rows.map((row) => [row.sectionId, row.excluded, row.content ?? '']),
+          sections: rows.map((row) => [
+            row.sectionId,
+            row.excluded,
+            row.content ?? '',
+            (row.figures ?? []).map((figure) => figure.documentId),
+          ]),
         }),
       ),
       cache: this.previewCacheAdapter,
@@ -490,6 +557,56 @@ export class ExportService {
       .where(and(eq(exportArtifacts.projectId, projectId), eq(exportArtifacts.userId, ctx.userId)))
       .orderBy(desc(exportArtifacts.createdAt))
       .limit(50);
+  }
+
+  /**
+   * Resolves the images attached to report sections into embeddable bytes.
+   *
+   * A figure row only stores `{ documentId, caption }`; the bytes live in storage
+   * under the document's key. Every document is re-checked against the caller so
+   * a section can never pull in another user's image. A figure whose document is
+   * missing or unreadable is dropped rather than breaking the whole export: the
+   * report is still correct, just without that picture.
+   */
+  private async loadFigures(
+    ctx: AuthContext,
+    rows: Array<{ sectionId: string; figures?: Array<{ documentId: string; caption?: string }> | null }>,
+  ): Promise<Map<string, AssemblyFigure[]>> {
+    const bySection = new Map<string, AssemblyFigure[]>();
+    const wanted = new Set<string>();
+    for (const row of rows) for (const figure of row.figures ?? []) wanted.add(figure.documentId);
+    if (wanted.size === 0) return bySection;
+
+    const docs = await this.db
+      .select({
+        id: documents.id,
+        storageKey: documents.storageKey,
+        mimeType: documents.mimeType,
+      })
+      .from(documents)
+      .where(and(eq(documents.userId, ctx.userId), inArray(documents.id, [...wanted])));
+
+    const loaded = new Map<string, { bytes: Uint8Array; extension: 'png' | 'jpeg' | 'gif' }>();
+    for (const doc of docs) {
+      const extension = imageExtensionFor(doc.mimeType, doc.storageKey);
+      if (!extension) continue;
+      try {
+        loaded.set(doc.id, { bytes: await this.storage.get(doc.storageKey), extension });
+      } catch {
+        // Unreadable object: skip this figure, keep the export working.
+      }
+    }
+
+    for (const row of rows) {
+      const figures: AssemblyFigure[] = [];
+      for (const figure of row.figures ?? []) {
+        const asset = loaded.get(figure.documentId);
+        if (!asset) continue;
+        figures.push({ bytes: asset.bytes, extension: asset.extension, caption: figure.caption ?? null });
+      }
+      if (figures.length > 0) bySection.set(row.sectionId, figures);
+    }
+    return bySection;
   }
 
   /** Loads an export artifact owned by the caller (404 otherwise). */

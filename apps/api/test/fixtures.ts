@@ -101,3 +101,56 @@ export function fakeDocx(): Uint8Array {
 export function fakePdf(): Uint8Array {
   return new TextEncoder().encode('<html><body>not a pdf</body></html>');
 }
+
+/**
+ * A minimal, structurally valid 2x2 RGB PNG.
+ *
+ * Tests that embed a diagram need image bytes whose header parses (the exporter
+ * reads width/height from IHDR) and which survive the ZIP round trip unchanged,
+ * without depending on an external fixture file.
+ */
+export function tinyPng(): Uint8Array {
+  const crcTable: number[] = [];
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const be32 = (value: number): number[] => [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ];
+  const chunk = (type: string, body: number[]): number[] => {
+    const payload = [...Array.from(type).map((ch) => ch.charCodeAt(0)), ...body];
+    let crc = 0xffffffff;
+    for (const byte of payload) crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
+    return [...be32(body.length), ...payload, ...be32((crc ^ 0xffffffff) >>> 0)];
+  };
+
+  // Raw scanlines: a filter byte plus two RGB pixels, per row.
+  const raw = [0, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255];
+  // A zlib stream with a single stored (uncompressed) deflate block.
+  const idat = [
+    0x78, 0x01,
+    0x01, raw.length & 0xff, (raw.length >>> 8) & 0xff, ~raw.length & 0xff, (~raw.length >>> 8) & 0xff,
+    ...raw,
+  ];
+  let a = 1;
+  let b = 0;
+  for (const byte of raw) {
+    a = (a + byte) % 65521;
+    b = (b + a) % 65521;
+  }
+  idat.push(...be32((b << 16) | a));
+
+  // width=2, height=2, bit depth 8, colour type 2 (truecolour).
+  const ihdr = [...be32(2), ...be32(2), 8, 2, 0, 0, 0];
+  return new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ...chunk('IHDR', ihdr),
+    ...chunk('IDAT', idat),
+    ...chunk('IEND', []),
+  ]);
+}

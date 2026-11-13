@@ -392,3 +392,168 @@ describe('generated tables', () => {
   });
 });
 
+/**
+ * A 2x2 RGB PNG built by hand.
+ *
+ * Diagram labels are what the user actually needs, and no image decoder ships in
+ * this package, so the test carries the bytes it expects to see come out again.
+ */
+function tinyPng(): Uint8Array {
+  const crcTable: number[] = [];
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const chunk = (type: string, body: number[]): number[] => {
+    const header = [
+      (body.length >>> 24) & 0xff,
+      (body.length >>> 16) & 0xff,
+      (body.length >>> 8) & 0xff,
+      body.length & 0xff,
+    ];
+    const payload = [...Array.from(type).map((ch) => ch.charCodeAt(0)), ...body];
+    let crc = 0xffffffff;
+    for (const byte of payload) crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
+    const final = (crc ^ 0xffffffff) >>> 0;
+    return [
+      ...header,
+      ...payload,
+      (final >>> 24) & 0xff,
+      (final >>> 16) & 0xff,
+      (final >>> 8) & 0xff,
+      final & 0xff,
+    ];
+  };
+  // Uncompressed-deflate-free approach: zlib stream with a stored block.
+  const raw = [0, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255];
+  const idat = [0x78, 0x01]; // zlib header
+  idat.push(0x01, raw.length & 0xff, (raw.length >>> 8) & 0xff, ~raw.length & 0xff, (~raw.length >>> 8) & 0xff);
+  idat.push(...raw);
+  // adler32
+  let a = 1;
+  let b = 0;
+  for (const byte of raw) {
+    a = (a + byte) % 65521;
+    b = (b + a) % 65521;
+  }
+  idat.push((b >>> 8) & 0xff, b & 0xff, (a >>> 8) & 0xff, a & 0xff);
+
+  const ihdr = [0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0];
+  return new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ...chunk('IHDR', ihdr),
+    ...chunk('IDAT', idat),
+    ...chunk('IEND', []),
+  ]);
+}
+
+describe('source figures', () => {
+  it('embeds an image as a media part with a relationship and content type', () => {
+    const bytes = tinyPng();
+    const template = complexTemplate();
+    const before = readDocxPackage(template);
+    const beforeMedia = Object.keys(before.files).filter((n) => n.startsWith('word/media/')).length;
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Topologi jaringan lab ditunjukkan pada gambar berikut.',
+          figures: [{ bytes, extension: 'png', caption: 'Sumber: 1.png' }],
+        },
+      ],
+    });
+
+    expect(result.insertedImages).toBe(1);
+    // The template's own images must survive and the fidelity check must accept
+    // the addition instead of reporting drift.
+    expect(result.fidelity.outputImages).toBe(beforeMedia + 1);
+    expect(result.fidelity.warnings.join(' ')).not.toContain('Image count');
+    expect(result.fidelity.passed).toBe(true);
+
+    const pkg = readDocxPackage(result.buffer);
+    const media = Object.keys(pkg.files).filter((n) => n.startsWith('word/media/'));
+    expect(media).toHaveLength(beforeMedia + 1);
+
+    const docXml = xmlToString(pkg.files['word/document.xml']!);
+    expect(docXml).toContain('<w:drawing>');
+
+    // A <w:drawing> whose r:embed has no matching relationship makes Word report
+    // the file as corrupt, so all three parts must agree.
+    const rels = xmlToString(pkg.files['word/_rels/document.xml.rels']!);
+    const embedRelId = /r:embed="([^"]+)"/.exec(docXml)![1]!;
+    expect(rels).toContain(`Id="${embedRelId}"`);
+    expect(rels).toContain('relationships/image');
+
+    const contentTypes = xmlToString(pkg.files['[Content_Types].xml']!);
+    expect(contentTypes).toMatch(/Extension="png"[^>]*ContentType="image\/png"/);
+  });
+
+  it('keeps the bytes byte-for-byte so the reader sees the original diagram', () => {
+    const bytes = tinyPng();
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Topologi.',
+          figures: [{ bytes, extension: 'png' }],
+        },
+      ],
+    });
+    const pkg = readDocxPackage(result.buffer);
+    const ours = Object.keys(pkg.files)
+      .filter((n) => n.startsWith('word/media/'))
+      .map((n) => pkg.files[n]!)
+      .some((part) => part.byteLength === bytes.byteLength && part.every((b, i) => b === bytes[i]));
+    expect(ours).toBe(true);
+  });
+
+  it('writes a figure even when the section was filled through a placeholder', () => {
+    // A section whose text came from replacing {{token}} must still get its
+    // diagram; only the prose is handled by the placeholder branch.
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-conclusion',
+          headingText: 'Chapter 3 Conclusion',
+          paragraphIndex: 0,
+          insertionStrategy: 'placeholder',
+          placeholder: '{{sec_conclusion}}',
+          content: 'Kesimpulan dari praktik kerja lapangan.',
+          figures: [{ bytes: tinyPng(), extension: 'png' }],
+        },
+      ],
+    });
+    expect(result.insertedImages).toBe(1);
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    expect(docXml).toContain('<w:drawing>');
+  });
+
+  it('skips an undecodable figure instead of writing a broken package', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-ip',
+          headingText: 'Chapter 1a Background',
+          paragraphIndex: 5,
+          insertionStrategy: 'after_heading',
+          content: 'Topologi.',
+          figures: [{ bytes: new Uint8Array([1, 2, 3]), extension: 'png' }],
+        },
+      ],
+    });
+    expect(result.insertedImages).toBe(0);
+    expect(result.fidelity.passed).toBe(true);
+    const docXml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    expect(docXml).not.toContain('rIdFig');
+  });
+});
+
+

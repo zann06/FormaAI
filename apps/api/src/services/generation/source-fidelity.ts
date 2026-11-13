@@ -10,6 +10,7 @@
  * This module cannot recover the true bytes, but it can stop the report from
  * presenting a doubtful token as a fact.
  */
+import { isOnlyGapMarkers } from '@formaai/shared';
 
 /** Characters that OCR emits when it cannot resolve a glyph. */
 const OCR_NOISE = /[\uFFFD\u25A1\u25A0\u2b1c]/g;
@@ -197,6 +198,89 @@ export function markSuspiciousInTable<
     },
     tokens: [...tokens],
   };
+}
+
+/**
+ * Finds table rows that have no basis in the evidence.
+ *
+ * A model told to "build the table" will happily invent entities to look thorough:
+ * asked to tabulate the subnets it could see, it produced a `/27` block and a `/25`
+ * remainder that appear nowhere in the source, and even admitted so in a warning
+ * while the table itself looked authoritative. A warning is not enough — the shape
+ * of the table is what a reader trusts.
+ *
+ * A row is judged by its FIRST cell, which is the row's identity (a subnet, a
+ * device, an interface). Other cells hold computed values and are expected to be
+ * new. A first cell counts as traceable when any meaningful token of it appears in
+ * the evidence; values the model tagged `(dihitung)` are stripped first, so a
+ * computed cell never makes its own row look invented.
+ */
+export function untraceableTableRows(
+  table: { columns: string[]; rows: string[][] } | null | undefined,
+  evidenceText: string,
+): string[] {
+  if (!table || table.rows.length === 0) return [];
+  const haystack = evidenceText.toLowerCase();
+
+  const isTraceable = (cell: string): boolean => {
+    const cleaned = cell
+      .replace(/\((?:dihitung|diturunkan)[^)]*\)/gi, ' ')
+      .replace(/\[(?:MISSING|PERLU DICEK)\s*:[^\]]*\]/gi, ' ')
+      .toLowerCase();
+
+    // A subnet block is one indivisible identity: "192.168.10.128/25" is NOT the
+    // same entity as "192.168.10.0/26" just because they share an octet prefix.
+    // Matching those loosely is how an invented block slipped through, so a
+    // CIDR-shaped cell must appear verbatim.
+    const cidr = cleaned.match(/\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}/g);
+    if (cidr) return cidr.some((block) => haystack.includes(block));
+
+    const tokens = [
+      ...(cleaned.match(/\d{1,3}(?:\.\d{1,3}){3}/g) ?? []),
+      ...(cleaned.match(/[a-z]{3,}/g) ?? []).filter((word) => !ROW_STOPWORDS.has(word)),
+    ];
+    if (tokens.length === 0) return true; // nothing distinctive to check
+    return tokens.some((token) => haystack.includes(token));
+  };
+
+  return table.rows
+    .filter((row) => row.length > 0 && !isTraceable(row[0] ?? ''))
+    .map((row) => row.slice(0, 3).join(' | '));
+}
+
+/**
+ * Words too common to prove a row came from the evidence.
+ *
+ * Row identity is often a plain device or interface name. Counting "the", "and" or
+ * "address" as a match would let any row pass, so only distinctive tokens count.
+ */
+const ROW_STOPWORDS = new Set([
+  'dan', 'yang', 'untuk', 'dari', 'pada', 'dengan', 'atau', 'adalah', 'ini', 'itu',
+  'the', 'and', 'for', 'from', 'with', 'address', 'alamat', 'router', 'interface',
+  'antarmuka', 'subnet', 'blok', 'mask', 'host', 'ip', 'gateway', 'start', 'pool',
+  'default', 'server', 'client', 'switch', 'network', 'jaringan',
+]);
+
+/**
+ * Rows that are nothing but gap markers.
+ *
+ * The opposite failure to an invented row: the model gave up on a row entirely even
+ * though the evidence supported some of its cells. A row reading "R-KABEL |
+ * [PERLU DICEK: alamat IP] | [PERLU DICEK: prefix] | …" discards the interface
+ * address that the `show ip interface brief` screenshot plainly shows.
+ */
+export function fullyUnfilledTableRows(table: { columns: string[]; rows: string[][] } | null | undefined): string[] {
+  if (!table || table.rows.length === 0) return [];
+  return table.rows
+    .filter((row) => {
+      const cells = row.filter((cell) => cell.trim().length > 0);
+      if (cells.length === 0) return false;
+      // The first cell names the row; it is an identity, not a data value, so it is
+      // expected to be plain text. The DATA cells are what must not all be markers.
+      const dataCells = cells.length > 1 ? cells.slice(1) : cells;
+      return dataCells.every((cell) => isOnlyGapMarkers(cell));
+    })
+    .map((row) => row[0] ?? '(unnamed row)');
 }
 
 /**

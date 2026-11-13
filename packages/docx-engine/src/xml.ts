@@ -338,8 +338,90 @@ export function createTable(
   return nodes;
 }
 
+/** Reads pixel dimensions from a PNG, JPEG or GIF header. */
+export function imagePixelSize(bytes: Uint8Array): { width: number; height: number } | null {
+  // PNG: 8-byte signature, then IHDR at offset 16 (width) and 20 (height).
+  if (
+    bytes.length > 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  // GIF: "GIF8", logical screen descriptor at 6 (little-endian 16-bit).
+  if (bytes.length > 10 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    return { width: bytes[6]! | (bytes[7]! << 8), height: bytes[8]! | (bytes[9]! << 8) };
+  }
+  // JPEG: walk the segments until a start-of-frame marker.
+  if (bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1]!;
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        const height = (bytes[offset + 5]! << 8) | bytes[offset + 6]!;
+        const width = (bytes[offset + 7]! << 8) | bytes[offset + 8]!;
+        return { width, height };
+      }
+      const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!;
+      if (length < 2) return null;
+      offset += 2 + length;
+    }
+  }
+  return null;
+}
+
 export function directParagraphs(container: XmlNode): XmlNode[] {
   return container.children.filter((c) => c.tag === 'w:p');
+}
+
+/**
+ * Builds a centred, inline image paragraph for an already-registered media part.
+ *
+ * `relId` must exist in `word/_rels/document.xml.rels` and `partName` in
+ * `[Content_Types].xml`, otherwise Word reports the file as corrupt — so the
+ * caller is responsible for both, and this function only writes the drawing XML.
+ * Dimensions are computed from the pixel size at 96 DPI and capped to the
+ * printable width so a large screenshot does not overflow the margin.
+ */
+export function createImageParagraph(options: {
+  relId: string;
+  documentPrId: number;
+  name: string;
+  widthPx: number;
+  heightPx: number;
+  maxWidthEmu?: number;
+}): XmlNode {
+  const EMU_PER_PX = 9525; // 96 DPI
+  const requested = Math.max(1, options.widthPx) * EMU_PER_PX;
+  const maxWidth = options.maxWidthEmu ?? 5_486_400; // ~6 inches, A4 minus margins
+  const scale = requested > maxWidth ? maxWidth / requested : 1;
+  const cx = Math.round(requested * scale);
+  const cy = Math.round(Math.max(1, options.heightPx) * EMU_PER_PX * scale);
+  const safeName = options.name.replace(/[^A-Za-z0-9._-]/g, '_');
+  const id = options.documentPrId;
+
+  const inlineXml =
+    `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>` +
+    `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+    `<wp:extent cx="${cx}" cy="${cy}"/>` +
+    `<wp:docPr id="${id}" name="Picture ${id}"/>` +
+    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="${safeName}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${options.relId}"/></pic:blipFill>` +
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"/></pic:spPr></pic:pic>` +
+    `</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+
+  const [paragraph] = parseXml(inlineXml);
+  if (!paragraph) throw new Error('Unable to build image paragraph');
+  return paragraph;
 }
 
 export function createTextRun(text: string, runProps?: XmlNode | null): XmlNode {

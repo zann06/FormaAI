@@ -60,21 +60,25 @@ export function rankEvidence(
   if (tokenize(queryText).length === 0) {
     return chunks.slice(0, Math.min(topK, 3)).map((chunk) => ({ chunk, score: 0.1 }));
   }
+  // Search in the vocabulary the sources use, not just the wording of the heading.
+  const expandedQuery = expandQuery(queryText);
   const ranked = bm25Rank(
-    queryText,
+    expandedQuery,
     chunks.map((chunk) => ({ item: chunk, text: `${chunk.headingPath ?? ''} ${chunk.text}` })),
-    { limit: topK },
+    { limit: topK * 4 },
   );
   const matched = ranked
     .filter((entry) => entry.score >= minScore)
     .map((entry) => ({ chunk: entry.item, score: entry.score }));
 
-  if (matched.length > 0 || fallback.length === 0) return matched;
+  if (matched.length > 0) return diversifyByDocument(matched, topK);
+
+  if (fallback.length === 0) return matched;
 
   // No keyword overlap: rank the fallback pool by how much of the heading it
   // covers, keeping a document-order tiebreak so the result stays deterministic.
   const scoredFallback = bm25Rank(
-    queryText,
+    expandedQuery,
     fallback.map((chunk) => ({ item: chunk, text: `${chunk.headingPath ?? ''} ${chunk.text}` })),
   );
   const pool = scoredFallback.some((entry) => entry.score > 0)
@@ -83,6 +87,97 @@ export function rankEvidence(
   return pool
     .slice(0, fallbackK)
     .map((entry) => ({ chunk: entry.item, score: Math.max(entry.score, 0.01) }));
+}
+
+/**
+ * Guarantees every relevant source gets a seat at the table.
+ *
+ * One screenshot produces dozens of chunks, and BM25 happily returns ten of them
+ * from the same document — which is how section 2.2 (VLSM) ended up reading six
+ * ping screenshots while the DHCP-pool table that actually answered it was never
+ * mapped. Taking the best chunk of each document first, then filling the remaining
+ * slots by score, keeps the most relevant evidence without letting one source
+ * crowd out the rest.
+ */
+/**
+ * Domain synonyms that bridge the wording gap between a heading and its evidence.
+ *
+ * A template heading says "Desain Subnetting Berbasis VLSM"; the screenshot that
+ * answers it says "Pool Name / Default Gateway / Start IP Address". Those share no
+ * words, so BM25 scored the answering chunk 0.000 and left the section to a generic
+ * topical fallback — which is why the VLSM section was drafted from ping
+ * screenshots. Expanding the query with the vocabulary the sources actually use
+ * fixes that without weakening the relevance threshold.
+ */
+const DOMAIN_SYNONYMS: Array<{ match: RegExp; expand: string[] }> = [
+  {
+    match: /\b(vlsm|subnet|subnetting|subnetting|pengalamatan|prefix|netmask)\b/i,
+    expand: ['pool', 'subnet', 'mask', 'gateway', 'start ip', 'wildcard', 'broadcast', 'host', 'prefix', 'alamat'],
+  },
+  {
+    match: /\b(dhcp)\b/i,
+    expand: ['dhcp', 'pool', 'lease', 'gateway', 'dns', 'start ip', 'excluded'],
+  },
+  {
+    match: /\b(routing|rute|route|forwarding)\b/i,
+    expand: ['route', 'routing', 'codes', 'connected', 'static', 'next hop', 'metric', 'via'],
+  },
+  {
+    match: /\b(ospf)\b/i,
+    expand: ['ospf', 'neighbor', 'adjacency', 'area', 'cost', 'hello', 'dr', 'bdr'],
+  },
+  {
+    match: /\b(ping|konektivitas|connectivity)\b/i,
+    expand: ['ping', 'pinging', 'reply', 'bytes', 'ttl', 'time', 'lost'],
+  },
+  {
+    match: /\b(traceroute|tracert|penelusuran|jalur)\b/i,
+    expand: ['tracert', 'traceroute', 'tracing', 'hops', 'route', 'ms'],
+  },
+  {
+    match: /\b(interface|antarmuka|konfigurasi)\b/i,
+    expand: ['interface', 'brief', 'status', 'protocol', 'up', 'down', 'ip-address', 'gigabitethernet'],
+  },
+  {
+    match: /\b(topologi|arsitektur|desain|diagram)\b/i,
+    expand: ['topology', 'router', 'switch', 'server', 'pc', 'laptop', 'gig', 'fa', 'access point'],
+  },
+  {
+    match: /\b(nirkabel|wireless|wifi|access point|ssid)\b/i,
+    expand: ['ssid', 'wpa', 'wireless', 'authentication', 'port', 'access point'],
+  },
+];
+
+/** Expands a heading into the vocabulary its evidence is likely written in. */
+function expandQuery(text: string): string {
+  const extra: string[] = [];
+  for (const { match, expand } of DOMAIN_SYNONYMS) {
+    if (match.test(text)) extra.push(...expand);
+  }
+  return extra.length > 0 ? `${text} ${extra.join(' ')}` : text;
+}
+
+function diversifyByDocument<T extends { chunk: { documentId: string }; score: number }>(
+  entries: T[],
+  limit: number,
+): T[] {
+  const bestPerDocument = new Map<string, T>();
+  for (const entry of entries) {
+    const current = bestPerDocument.get(entry.chunk.documentId);
+    if (!current || entry.score > current.score) bestPerDocument.set(entry.chunk.documentId, entry);
+  }
+  const winners = [...bestPerDocument.values()].sort((a, b) => b.score - a.score);
+  const picked = winners.slice(0, limit);
+  // Remaining slots go to the next-best entries overall, so a strong source can
+  // still contribute more than one chunk.
+  const chosen = new Set(picked);
+  for (const entry of entries) {
+    if (picked.length >= limit) break;
+    if (chosen.has(entry)) continue;
+    picked.push(entry);
+    chosen.add(entry);
+  }
+  return picked;
 }
 
 /**

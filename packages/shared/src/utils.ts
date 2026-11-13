@@ -153,3 +153,41 @@ export function formatBytes(bytes: number): string {
   const value = bytes / 1024 ** exponent;
   return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 }
+
+/**
+ * Markers a draft can leave behind, in either report language.
+ *
+ * `[MISSING: …]` is the English form; `[PERLU DICEK: …]` the Indonesian one. Both
+ * mean "a human must supply or verify this", so every place that counts gaps, or
+ * decides a section is empty, has to recognise both — otherwise an Indonesian
+ * report would look complete while still carrying a hole.
+ */
+export const GAP_MARKER_PATTERN = /\[(?:MISSING|PERLU DICEK)\s*:[^\]]*\]/gi;
+
+/** Matches a gap marker, without the global flag (safe for `.test`). */
+export const GAP_MARKER_TEST = /\[(?:MISSING|PERLU DICEK)\s*:/i;
+
+/** Counts the gap markers in a piece of text. */
+export function countGapMarkers(text: string): number {
+  return text.match(GAP_MARKER_PATTERN)?.length ?? 0;
+}
+
+/** True when the text is nothing but gap markers (and whitespace). */
+export function isOnlyGapMarkers(text: string): boolean {
+  if (!GAP_MARKER_TEST.test(text)) return false;
+  return text.replace(GAP_MARKER_PATTERN, '').trim().length === 0;
+}
+
+/**
+ * Marker for a value the model computed rather than read from the evidence.
+ *
+ * The report is allowed to do the work — VLSM maths, derived conclusions — but the
+ * reader must be able to tell a computed figure from a recorded one, so every
+ * derived value carries this tag.
+ */
+export const COMPUTED_MARKER = '(dihitung)';
+
+/** Counts derived values, so the UI can say how many figures need a check. */
+export function countComputedValues(text: string): number {
+  return text.match(/\((?:dihitung|diturunkan)[^)]*\)/gi)?.length ?? 0;
+}

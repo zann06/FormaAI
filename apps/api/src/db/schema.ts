@@ -271,6 +271,18 @@ export const reportSections = pgTable(
      * pipes into a paragraph.
      */
     tableData: jsonb('table_data').$type<{ columns: string[]; rows: string[][]; caption?: string } | null>(),
+    /**
+     * Source images (diagrams, screenshots) to embed in this section.
+     *
+     * A network topology or a screenshot of CLI output is evidence the prose cannot
+     * reproduce: the reader must see the picture itself. OCR only recovers its
+     * labels and gets some of them wrong, so the image is carried through to the
+     * exported DOCX and the OCR text is marked as needing verification.
+     */
+    figures: jsonb('figures')
+      .$type<Array<{ documentId: string; caption?: string }>>()
+      .notNull()
+      .default([]),
     providerCredentialId: uuid('provider_credential_id'),
     modelUsed: varchar('model_used', { length: 160 }),
     generatedAt: timestamp('generated_at', { withTimezone: true }),

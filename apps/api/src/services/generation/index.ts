@@ -12,10 +12,12 @@ import { completeWithFallback, ProviderError, type ProviderRegistry } from '@for
 import { buildSectionMessages, sectionDraftSchema, type SectionPromptInput } from './prompts.js';
 import {
   cleanEvidenceText,
+  fullyUnfilledTableRows,
   markSuspiciousInBody,
   markSuspiciousInTable,
   stripInventedQuotes,
   stripOcrAnnotations,
+  untraceableTableRows,
 } from './source-fidelity.js';
 import {
   containsMarkdownHeadings,
@@ -25,7 +27,14 @@ import {
   parseModelJson,
   sectionDraftZod,
 } from './schemas.js';
-import { countWords, classifySection, shouldKeepTemplateText, type SectionKind } from '@formaai/shared';
+import {
+  countWords,
+  classifySection,
+  shouldKeepTemplateText,
+  countGapMarkers,
+  countComputedValues,
+  type SectionKind,
+} from '@formaai/shared';
 
 export interface GenerationResult {
   sectionId: string;
@@ -192,6 +201,8 @@ export class GenerationService {
             page: extractedChunks.page,
             paragraphIndex: extractedChunks.paragraphIndex,
             documentName: documents.originalName,
+            documentId: extractedChunks.documentId,
+            mimeType: documents.mimeType,
           })
           .from(extractedChunks)
           .innerJoin(documents, eq(documents.id, extractedChunks.documentId))
@@ -427,6 +438,39 @@ export class GenerationService {
       );
     }
 
+    // A table row must be traceable to the evidence. The prompt forbids padding a
+    // table with invented rows, but a model that wants to look thorough will still
+    // do it — the VLSM table above carried a "/27" subnet and a "/25" remainder
+    // block that no source mentions. Catching it here is what stops a complete
+    // looking table from being a fabricated one.
+    const unsupportedRows = untraceableTableRows(parsed.data.table ?? null, evidenceText);
+    if (unsupportedRows.length > 0) {
+      warnings.push(
+        `These table rows are not mentioned in the evidence mapped to this section. Either the row was invented, or the source that supports it was not mapped here — check both before submitting: ${unsupportedRows
+          .slice(0, 6)
+          .join('; ')}`,
+      );
+    }
+
+    // A missing cell must not erase a row: the model sometimes returns a row whose
+    // every cell is a marker, discarding data the evidence plainly contains.
+    const abandonedRows = fullyUnfilledTableRows(parsed.data.table ?? null);
+    if (abandonedRows.length > 0) {
+      warnings.push(
+        `These table rows were left entirely blank even though your sources likely contain part of the answer — fill in what the evidence states: ${abandonedRows
+          .slice(0, 6)
+          .join(', ')}`,
+      );
+    }
+
+    // A diagram or CLI screenshot is evidence the prose cannot reproduce, and OCR
+    // reads its labels imperfectly. Attach the source image itself so the reader
+    // sees the original — but only where it belongs. One screenshot yields dozens
+    // of chunks, so counting citations selects everything; instead the image's own
+    // OCR text is matched against the heading, so the DHCP pool screenshot lands in
+    // the DHCP section and `show ip ospf neighbor` lands in the OSPF section.
+    const figures = selectFiguresForSection(evidence, section.heading ?? '');
+
     const updated = await this.saveContent(ctx, projectId, sectionId, parsed.data.body, 'draft', reportSection.revision, {
       warnings,
       citedChunkIds,
@@ -434,6 +478,7 @@ export class GenerationService {
       providerCredentialId: completion.usedCredentialId,
       modelUsed: completion.result.model,
       table: parsed.data.table ?? null,
+      figures,
     });
 
     return {
@@ -463,11 +508,15 @@ export class GenerationService {
       modelUsed: string | null;
       /** Structural table for this section, when the heading asked for one. */
       table?: { columns: string[]; rows: string[][]; caption?: string } | null;
+      /** Source images to embed, resolved to bytes at export time. */
+      figures?: Array<{ documentId: string; caption?: string }>;
     },
   ) {
     // Typing into a section must not silently delete its table, so an edit keeps
     // whatever table was generated. Only generation replaces it.
     const tableValue = extra.table === undefined ? undefined : extra.table;
+    // Same rule for figures: an edit keeps the diagrams already attached.
+    const figuresValue = extra.figures === undefined ? undefined : extra.figures;
     const [row] = await this.db
       .update(reportSections)
       .set({
@@ -480,6 +529,7 @@ export class GenerationService {
         providerCredentialId: extra.providerCredentialId,
         modelUsed: extra.modelUsed,
         ...(tableValue !== undefined ? { tableData: tableValue } : {}),
+        ...(figuresValue !== undefined ? { figures: figuresValue } : {}),
         generatedAt: new Date(),
         wordCount: countWords(content),
         updatedAt: new Date(),
@@ -548,14 +598,23 @@ export class GenerationService {
      */
     keptTemplateText: Array<{ sectionId: string; heading: string }>;
     /**
-     * Total `[MISSING: …]` markers across the drafted sections.
+     * Total gap markers (`[MISSING: …]` / `[PERLU DICEK: …]`) across the drafted
+     * sections.
      *
-     * A section can map fine and still leave facts unfilled, because the model
-     * flagged data no source provided (a student's name, an NIM, a cover logo).
-     * Those markers are exported verbatim, so "44 of 44 drafted" must not hide
-     * the fact that the shipped file still asks to be completed.
+     * A section can map fine and still leave a value the model could not derive
+     * (a reading nobody recorded, a submission date). Those markers are exported
+     * verbatim, so "44 of 44 drafted" must not hide the fact that the shipped file
+     * still asks to be completed.
      */
     unfilledDetails: number;
+    /**
+     * Total derived figures the model computed rather than read (VLSM maths,
+     * inferred conclusions), each tagged `(dihitung)` in the text.
+     *
+     * These are finished work, not gaps — but a computed number deserves a second
+     * look before the report is submitted, so the count is surfaced separately.
+     */
+    computedDetails: number;
   }> {
     const eligible = await this.eligibleSections(ctx, projectId);
     const selected = options.sectionIds ? eligible.filter((s) => options.sectionIds!.includes(s.id)) : eligible;
@@ -606,17 +665,20 @@ export class GenerationService {
       .where(and(eq(projects.id, projectId), eq(projects.userId, ctx.userId)));
 
     // Count the gap markers that actually ended up in the report, so the caller
-    // can warn that the exported file still needs a human to fill them in.
+    // can warn that the exported file still needs a human to fill them in. Derived
+    // values are counted separately: they are finished work, but a computed figure
+    // is still something the reader should verify before submitting.
     const written = await this.db
       .select({ content: reportSections.content })
       .from(reportSections)
       .where(and(eq(reportSections.projectId, projectId), eq(reportSections.userId, ctx.userId)));
-    const unfilledDetails = written.reduce(
-      (total, row) => total + (String(row.content ?? '').match(/\[MISSING:[^\]]*\]/g)?.length ?? 0),
+    const unfilledDetails = written.reduce((total, row) => total + countGapMarkers(String(row.content ?? '')), 0);
+    const computedDetails = written.reduce(
+      (total, row) => total + countComputedValues(String(row.content ?? '')),
       0,
     );
 
-    return { results, generated: results.length - failed, failed, deferred, keptTemplateText, unfilledDetails };
+    return { results, generated: results.length - failed, failed, deferred, keptTemplateText, unfilledDetails, computedDetails };
   }
 
   async getSectionForEditing(ctx: AuthContext, sectionId: string) {
@@ -690,6 +752,85 @@ export class GenerationService {
     return this.facts.conflictsForProject(ctx, projectId);
   }
 
+}
+
+/**
+ * Picks the source images that genuinely belong to one section.
+ *
+ * A single screenshot produces dozens of OCR chunks, so any rule based on
+ * "was this chunk cited" selects every image for every section — which is how the
+ * export ended up with 108 figures for 44 sections. The image's own OCR text is
+ * the honest signal: it says what the screenshot *is* (`show ip ospf neighbor`,
+ * `tracert`, a DHCP pool), so it is matched against the heading.
+ *
+ * An image is kept only when it scores above zero, so sections without a matching
+ * picture stay text-only instead of carrying unrelated screenshots.
+ *
+ * Chapter dividers ("BAB II: …") are skipped entirely: the same figure then shows
+ * up twice in a row — once on the divider, once under the subsection that actually
+ * discusses it.
+ */
+export function selectFiguresForSection(
+  evidence: Array<{ id: string; documentId: string; documentName: string; mimeType?: string | null; text: string }>,
+  heading: string,
+  max = 2,
+): Array<{ documentId: string; caption: string }> {
+  // A chapter divider is a label, not a discussion — it deserves no figure.
+  if (/^\s*bab\s+[ivx\d]+\b/i.test(heading)) return [];
+
+  const headingLower = heading.toLowerCase();
+
+  // Group the chunks of each image so scoring looks at all of its OCR text.
+  const byDocument = new Map<string, { name: string; text: string[] }>();
+  for (const chunk of evidence) {
+    if (!chunk.mimeType?.startsWith('image/')) continue;
+    const entry = byDocument.get(chunk.documentId) ?? { name: chunk.documentName, text: [] };
+    entry.text.push(chunk.text);
+    byDocument.set(chunk.documentId, entry);
+  }
+
+  /**
+   * Signals that identify what a screenshot shows, paired with the heading words
+   * that make it relevant. Matching is deliberately concrete: a generic word like
+   * "jaringan" would pull every picture into every chapter.
+   */
+  const signals: Array<{ pattern: RegExp; topic: RegExp }> = [
+    { pattern: /show\s+ip\s+ospf\s+neighbor/i, topic: /ospf|neighbor|ketetanggaan/i },
+    // A topology diagram shows device names with interface labels and no CLI prompt.
+    {
+      pattern: /(router|switch|server|pc|laptop|smartphone)\d*\b/i,
+      topic: /topologi|arsitektur|desain|diagram/i,
+    },
+    { pattern: /show\s+ip\s+route/i, topic: /forwarding|routing|rute|tabel routing/i },
+    { pattern: /show\s+ip\s+interface\s+brief/i, topic: /interface|antarmuka|alokasi ip|verifikasi alokasi/i },
+    { pattern: /tracert/i, topic: /traceroute|penelusuran|jalur/i },
+    { pattern: /ping(ing)?\s+192|>\s*ping/i, topic: /ping|konektivitas|pengujian/i },
+    { pattern: /pool\s+name|dhcp/i, topic: /dhcp/i },
+    { pattern: /ssid|wpa|wireless/i, topic: /nirkabel|wireless|access point|ssid/i },
+  ];
+
+  const scored = [...byDocument.entries()].map(([documentId, entry]) => {
+    const joined = entry.text.join('\n');
+    // A CLI screenshot is only ever relevant to the command it shows, so a ping
+    // capture must not be pulled into the traceroute section just because both are
+    // "pengujian". Strong, exclusive commands score higher than loose keywords.
+    const isCli = /\b(show\s+ip|ping|tracert|Codes:)\b/i.test(joined);
+    let score = 0;
+    for (const { pattern, topic } of signals) {
+      if (pattern.test(joined) && topic.test(headingLower)) score += isCli ? 2 : 1;
+    }
+    return { documentId, caption: `Sumber: ${entry.name}`, score };
+  });
+
+  // Only images tied for the best score are kept. Allowing a near-miss (score >=
+  // best - 1) let the traceroute capture sit in "Konsep dan Desain Rute Statis",
+  // which has nothing to do with running the command.
+  const best = Math.max(0, ...scored.map((entry) => entry.score));
+  return scored
+    .filter((entry) => entry.score > 0 && entry.score === best)
+    .sort((a, b) => a.caption.localeCompare(b.caption))
+    .slice(0, max)
+    .map(({ documentId, caption }) => ({ documentId, caption }));
 }
 
 function safeParseJson(text: string): unknown {

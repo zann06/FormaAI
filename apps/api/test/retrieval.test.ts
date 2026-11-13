@@ -77,6 +77,33 @@ describe('rankEvidence', () => {
   it('still returns nothing when there is no evidence at all', () => {
     expect(rankEvidence({ heading: 'BAB I PENDAHULUAN' }, [], { fallback: buildTopicPool([]) })).toEqual([]);
   });
+
+  it('finds the evidence that answers a heading even when it shares no words', () => {
+    // The real failure: the heading says "Subnetting VLSM", the answering screenshot
+    // says "Pool Name / Default Gateway / Start IP Address". BM25 scored it 0.000, so
+    // the section was drafted from unrelated ping screenshots.
+    const noisy: EvidenceChunk[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      noisy.push(chunk(`noisy-${i}`, `ping reply bytes ttl baris ${i}`, i, 'screenshot-ping'));
+    }
+    noisy.push(
+      chunk('pool', 'Pool Name serverPool Default Gateway 192.168.10.1 Start IP Address 192.168.10.10', 0, 'dhcp-table'),
+    );
+
+    const ranked = rankEvidence({ heading: '2.2 Desain Subnetting Berbasis VLSM' }, noisy, { topK: 4 });
+    expect(ranked.map((entry) => entry.chunk.documentId)).toContain('dhcp-table');
+  });
+
+  it('keeps the most relevant chunk of each document first', () => {
+    const uneven: EvidenceChunk[] = [
+      chunk('a1', 'routing ospf neighbor tabel', 0, 'doc-a'),
+      chunk('a2', 'routing ospf neighbor detail', 1, 'doc-a'),
+      chunk('a3', 'routing ospf neighbor lanjutan', 2, 'doc-a'),
+      chunk('b1', 'routing ospf neighbor', 0, 'doc-b'),
+    ];
+    const ranked = rankEvidence({ heading: 'routing ospf neighbor' }, uneven, { topK: 2 });
+    expect(new Set(ranked.map((entry) => entry.chunk.documentId))).toEqual(new Set(['doc-a', 'doc-b']));
+  });
 });
 
 describe('buildTopicPool', () => {

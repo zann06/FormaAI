@@ -290,11 +290,15 @@ export async function runPipeline(
   // still waiting for source material.
   const unmapped = mapping.mappings.filter((row) => (row.evidence?.length ?? 0) === 0).length;
 
-  // A section can map fine and still contain [MISSING: …] markers, because the
-  // model flagged facts no source provided (a student's name, an NIM, a cover
-  // logo). Those markers are exported verbatim, so a report could claim
-  // "44 of 44 drafted" while the shipped file still asks to be completed.
+  // A section can map fine and still contain a gap marker, because the model
+  // flagged a value nothing could supply (a reading nobody recorded, a date). The
+  // marker is exported verbatim, so a report could claim "44 of 44 drafted" while
+  // the shipped file still asks to be completed.
   const unfilled = draft.unfilledDetails;
+
+  // Derived figures are different: the report did the work, but a computed number
+  // should still be checked before submission. Say so without calling it a gap.
+  const computed = draft.computedDetails;
 
   return summarize(
     `Drafted ${drafted} of ${sections} section${sections === 1 ? '' : 's'} from ${usableSources.length} source${
@@ -303,8 +307,11 @@ export async function runPipeline(
       (unmapped > 0
         ? ` ${unmapped} section${unmapped === 1 ? '' : 's'} had no matching source material and ${unmapped === 1 ? 'is' : 'are'} left with a [MISSING] note — add evidence or mark ${unmapped === 1 ? 'it' : 'them'} not required.`
         : '') +
+      (computed > 0
+        ? ` ${computed} figure${computed === 1 ? '' : 's'} ${computed === 1 ? 'was' : 'were'} computed by the assistant and ${computed === 1 ? 'is' : 'are'} tagged "(dihitung)" — verify ${computed === 1 ? 'it' : 'them'} against your own working.`
+        : '') +
       (unfilled > 0
-        ? ` ${unfilled} detail${unfilled === 1 ? '' : 's'} could not be filled from your sources and ${unfilled === 1 ? 'is' : 'are'} marked [MISSING] in the document — fill ${unfilled === 1 ? 'it' : 'them'} before submitting.`
+        ? ` ${unfilled} value${unfilled === 1 ? '' : 's'} could not be derived and ${unfilled === 1 ? 'is' : 'are'} marked [PERLU DICEK] in the document — fill ${unfilled === 1 ? 'it' : 'them'} before submitting.`
         : ''),
     steps,
     sections,

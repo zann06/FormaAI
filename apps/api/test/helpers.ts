@@ -30,6 +30,10 @@ export interface TestApp {
   app: FastifyInstance;
   config: AppConfig;
   storageDir: string;
+  /** Database handle, for arranging state the HTTP surface does not expose. */
+  db: ReturnType<typeof createDb>['db'];
+  /** Storage adapter, so a test can place bytes the API will read back. */
+  storage: ReturnType<typeof createStorage>;
   /** Drains queued jobs synchronously so tests never wait on timers. */
   drainQueue: (maxJobs?: number) => Promise<number>;
   close: () => Promise<void>;
@@ -104,6 +108,8 @@ export async function createTestApp(overrides: Partial<Record<string, string>> =
     app: server.app,
     config,
     storageDir,
+    db,
+    storage,
     drainQueue: async (maxJobs = 50) => worker.runOnce(maxJobs),
     close: async () => {
       await server.app.close();

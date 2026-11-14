@@ -206,6 +206,56 @@ export async function registerPipelineRoutes(instance: FastifyInstance, ctx: Ser
     },
   );
 
+  /**
+   * Resolves the `[PERLU DICEK: …]` markers of one section from the evidence.
+   *
+   * Runs synchronously because it is a single model call and the editor shows the
+   * result immediately. The project-wide variant below is a job for the same
+   * reason generation is: it is one call per section, which is far too long to
+   * hold an HTTP request open.
+   */
+  instance.post(
+    '/api/projects/:projectId/sections/:sectionId/resolve-gaps',
+    { config: { rateLimit: { max: 60, timeWindow: '10 minutes' } } },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const { projectId, sectionId } = parseParams(request, sectionParams);
+      const input = parseBody(request, z.object({ providerCredentialId: z.string().uuid().nullish() }));
+      const detail = await ctx.generationService.getSectionForEditing(user, sectionId);
+      if (detail.template.projectId !== projectId) throw notFound('Section not found');
+      const summary = await ctx.generationService.resolveSectionGaps(user, projectId, sectionId, {
+        providerCredentialId: input.providerCredentialId ?? undefined,
+      });
+      return reply.send({ summary });
+    },
+  );
+
+  instance.post(
+    '/api/projects/:projectId/resolve-gaps',
+    { config: { rateLimit: { max: 12, timeWindow: '10 minutes' } } },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const { projectId } = parseParams(request, projectParams);
+      const input = parseBody(
+        request,
+        z.object({
+          sectionIds: z.array(z.string().uuid()).max(60).optional(),
+          providerCredentialId: z.string().uuid().nullish(),
+        }),
+      );
+      await ctx.projectService.getOwned(user, projectId);
+      const job = await jobs.enqueue(user, {
+        projectId,
+        kind: 'resolve_gaps',
+        payload: {
+          sectionIds: input.sectionIds,
+          providerCredentialId: input.providerCredentialId ?? undefined,
+        },
+      });
+      return reply.status(202).send({ jobId: job.id });
+    },
+  );
+
   instance.post('/api/projects/:projectId/versions', async (request, reply) => {
     const user = requireUser(request);
     const { projectId } = parseParams(request, projectParams);

@@ -8,8 +8,18 @@ import type { CredentialService } from '../credentials/index.js';
 import type { MappingService } from '../mapping/index.js';
 import type { UsageService } from '../usage/index.js';
 import type { FactService } from '../facts/index.js';
-import { completeWithFallback, ProviderError, type ProviderRegistry } from '@formaai/ai-providers';
+import { completeWithFallback, ProviderError, type ProviderRegistry, type ChatMessage, type ContentPart } from '@formaai/ai-providers';
 import { buildSectionMessages, sectionDraftSchema, type SectionPromptInput } from './prompts.js';
+import {
+  applyDocumentGapResolutions,
+  buildGapResolutionPrompt,
+  collectDocumentGaps,
+  decideProposal,
+  parseGapProposals,
+  proposalsFromModel,
+  type GapResolutionSummary,
+} from './gaps.js';
+import type { StorageAdapter } from '../storage/index.js';
 import {
   cleanEvidenceText,
   fullyUnfilledTableRows,
@@ -71,6 +81,7 @@ export class GenerationService {
     private readonly usage: UsageService,
     private readonly facts: FactService,
     private readonly registry: ProviderRegistry,
+    private readonly storage: StorageAdapter,
   ) {}
 
   async ensureReportSection(ctx: AuthContext, projectId: string, sectionId: string) {
@@ -884,6 +895,403 @@ export class GenerationService {
 
   async gapsForContext(ctx: AuthContext, projectId: string) {
     return this.facts.conflictsForProject(ctx, projectId);
+  }
+
+  /**
+   * Fills `[PERLU DICEK: …]` markers from the evidence, using the source images.
+   *
+   * Generation writes an honest marker whenever the text it received lacks a
+   * value. Many of those values are visible in the screenshots the text was OCR'd
+   * from — a mask length the OCR dropped, a version number it misread — so this
+   * pass shows the model the pixels and asks for exactly those values.
+   *
+   * It is deliberately conservative: a value read from text must literally be
+   * present in that text, an image-sourced value must name an image that was
+   * actually attached, and anything uncertain is discarded so its marker stays.
+   * The summary reports both outcomes so the chat can tell the user what is still
+   * missing instead of implying the report is complete.
+   */
+  async resolveSectionGaps(
+    ctx: AuthContext,
+    projectId: string,
+    sectionId: string,
+    options: { providerCredentialId?: string; jobId?: string } = {},
+  ): Promise<GapResolutionSummary> {
+    const reportSection = await this.ensureReportSection(ctx, projectId, sectionId);
+    const [templateRow] = await this.db
+      .select({ heading: templateSections.heading })
+      .from(templateSections)
+      .where(and(eq(templateSections.id, sectionId), eq(templateSections.userId, ctx.userId)))
+      .limit(1);
+    const heading = templateRow?.heading ?? '';
+    const content = reportSection.content ?? '';
+    const table = reportSection.tableData ?? null;
+    const markers = collectDocumentGaps(content, table);
+    const emptySummary: GapResolutionSummary = {
+      sectionId,
+      heading,
+      found: 0,
+      resolved: 0,
+      remaining: [],
+      content,
+      imageDerived: [],
+    };
+    if (markers.length === 0) return emptySummary;
+
+    const [project] = await this.db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.userId, ctx.userId)))
+      .limit(1);
+    if (!project) throw notFound('Project not found');
+
+    // Evidence is everything retrieval mapped to this section PLUS every chunk that
+    // mentions this section's subject. Retrieval picks a handful of chunks per
+    // section, so an addressing table mapped only the two DHCP-pool screenshots and
+    // never saw the routing captures that hold the interface masks — verification
+    // then reported "not in the evidence" for values the project plainly contains.
+    // The section's own mapped chunks stay, so nothing that was used to write it is
+    // lost.
+    const [mappingRow] = await this.db
+      .select()
+      .from(sectionMappings)
+      .where(and(eq(sectionMappings.sectionId, sectionId), eq(sectionMappings.userId, ctx.userId)))
+      .limit(1);
+    const mappedIds = mappingRow?.evidenceChunkIds ?? [];
+    const mappedRows = mappedIds.length
+      ? await this.db
+          .select({
+            text: extractedChunks.text,
+            documentName: documents.originalName,
+            page: extractedChunks.page,
+          })
+          .from(extractedChunks)
+          .innerJoin(documents, eq(documents.id, extractedChunks.documentId))
+          .where(and(inArray(extractedChunks.id, mappedIds), eq(extractedChunks.userId, ctx.userId)))
+      : [];
+
+    const nearbyRows = await this.chunksNearSubject(ctx, projectId, heading, mappedIds);
+    const evidenceRows = [...mappedRows, ...nearbyRows];
+    const evidenceText = evidenceRows
+      .map((row) => `[${row.documentName}${row.page ? ` p.${row.page}` : ''}]\n${row.text}`)
+      .join('\n\n');
+
+    const images = await this.loadGapImages(ctx, projectId, heading, markers);
+    if (!evidenceText.trim() && images.length === 0) {
+      // Neither text nor pixels: there is nothing honest to resolve from, so the
+      // pass returns without spending a request or touching the content.
+      return {
+        ...emptySummary,
+        found: markers.length,
+        remaining: markers.map((marker) => ({
+          marker: marker.marker,
+          reason: 'No source text or images are mapped to this section, so nothing can be verified.',
+          where: marker.where,
+        })),
+      };
+    }
+
+    const attachedImages = images.map((image) => image.documentName);
+    const resolved = await this.credentials.resolveForGeneration(ctx, options.providerCredentialId);
+
+    const prompt = buildGapResolutionPrompt({
+      heading,
+      language: project.language ?? 'id',
+      markers,
+      evidenceText,
+      attachedImages,
+    });
+
+    // Images travel as content parts; the prompt stays the text part so the model
+    // sees the instruction first and the pixels immediately after it.
+    const parts: ContentPart[] = [{ type: 'text', text: prompt }];
+    for (const image of images) {
+      parts.push({ type: 'image', mediaType: image.mediaType, base64: image.base64 });
+    }
+    const messages: ChatMessage[] = [{ role: 'user', content: parts }];
+
+    const started = Date.now();
+    let completion;
+    try {
+      completion = await completeWithFallback({
+        registry: this.registry,
+        primary: resolved.primary,
+        fallback: resolved.fallback,
+        request: { messages, signal: AbortSignal.timeout(this.config.AI_REQUEST_TIMEOUT_MS) },
+        onAttempt: async (credentialId, outcome, error, usage) => {
+          await this.usage.record(ctx, {
+            projectId,
+            credentialId,
+            jobId: options.jobId,
+            providerType: resolved.primary.providerType,
+            model: resolved.primary.model,
+            operation: 'resolve_gaps',
+            status: outcome,
+            errorCode: error?.code,
+            inputTokens: usage?.inputTokens ?? 0,
+            outputTokens: usage?.outputTokens ?? 0,
+            durationMs: Date.now() - started,
+          });
+        },
+      });
+    } catch (error) {
+      const message = error instanceof ProviderError ? error.message : (error as Error).message;
+      throw new AppError('PROVIDER_ERROR', `Could not verify the remaining gaps: ${message}`);
+    }
+
+    const rawProposals = parseGapProposals(completion.result.text);
+    const proposals = proposalsFromModel(rawProposals, markers);
+    const decisions = proposals.map((proposal) => decideProposal(proposal, evidenceText, attachedImages));
+    const accepted = decisions.filter((decision) => decision.accepted);
+    const acceptedIds = new Set(accepted.map((decision) => decision.proposal.id));
+    const applied = applyDocumentGapResolutions({ content, table }, decisions);
+
+    if (applied.replaced === 0) {
+      return {
+        ...emptySummary,
+        found: markers.length,
+        remaining: markers.map((marker) => ({
+          marker: marker.marker,
+          reason:
+            decisions.find((decision) => decision.proposal.id === marker.id)?.reason ??
+            'The evidence does not contain this value.',
+          where: marker.where,
+        })),
+      };
+    }
+
+    const imageDerived = accepted
+      .filter((decision) => decision.proposal.source === 'image')
+      .map((decision) => ({
+        marker: decision.proposal.markerText,
+        value: decision.proposal.value,
+        documentName: decision.proposal.documentName ?? '',
+      }));
+
+    const remainingAfter = collectDocumentGaps(applied.content, applied.table);
+    const warnings = [...(reportSection.warnings ?? [])];
+    warnings.push(
+      `Filled ${applied.replaced} of ${markers.length} unverified value(s) from the evidence. ` +
+        `${remainingAfter.length} still need${remainingAfter.length === 1 ? 's' : ''} your check.`,
+    );
+    if (imageDerived.length > 0) {
+      warnings.push(
+        `Read from a screenshot (verify against the original): ${imageDerived
+          .map((entry) => `${entry.value} for ${entry.marker}`)
+          .join('; ')}.`,
+      );
+    }
+
+    const saved = await this.saveContent(
+      ctx,
+      projectId,
+      sectionId,
+      applied.content,
+      reportSection.status === 'approved' ? 'approved' : 'draft',
+      reportSection.revision,
+      {
+        warnings,
+        citedChunkIds: reportSection.citedChunkIds ?? [],
+        placeholders: remainingAfter.map((marker) => marker.marker),
+        providerCredentialId: completion.usedCredentialId,
+        modelUsed: completion.result.model,
+        // The table is part of the document: a value filled in a cell that is not
+        // written back would disappear the next time the section is rendered.
+        table: applied.table,
+      },
+    );
+
+    return {
+      sectionId,
+      heading,
+      found: markers.length,
+      resolved: applied.replaced,
+      remaining: markers
+        .filter((marker) => !acceptedIds.has(marker.id))
+        .map((marker) => ({
+          marker: marker.marker,
+          reason:
+            decisions.find((decision) => decision.proposal.id === marker.id)?.reason ??
+            'Not resolved by this pass.',
+          where: marker.where,
+        })),
+      content: saved.content,
+      imageDerived,
+    };
+  }
+
+  /**
+   * Resolves gaps across many sections, one model call each.
+   *
+   * Bounded on purpose: a project can hold 40+ sections and an unbounded run would
+   * take minutes while the user stares at a progress bar with no idea what it is
+   * doing. Sections without markers are skipped without a request, and the caller
+   * gets a per-section summary so the chat can report exactly what is left.
+   */
+  async resolveManyGaps(
+    ctx: AuthContext,
+    projectId: string,
+    options: { sectionIds?: string[]; providerCredentialId?: string; jobId?: string } = {},
+    onProgress?: (done: number, total: number, heading: string) => Promise<void> | void,
+  ): Promise<GapResolutionSummary[]> {
+    const rows = await this.db
+      .select({
+        sectionId: templateSections.id,
+        heading: templateSections.heading,
+        content: reportSections.content,
+        table: reportSections.tableData,
+      })
+      .from(templateSections)
+      .leftJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
+      .where(and(eq(templateSections.projectId, projectId), eq(templateSections.userId, ctx.userId)))
+      .orderBy(asc(templateSections.sortOrder));
+
+    const wanted = options.sectionIds ? new Set(options.sectionIds) : null;
+    const withGaps = rows.filter(
+      (row) =>
+        (!wanted || wanted.has(row.sectionId)) &&
+        collectDocumentGaps(row.content ?? '', row.table ?? null).length > 0,
+    );
+
+    const summaries: GapResolutionSummary[] = [];
+    for (const [index, row] of withGaps.entries()) {
+      await onProgress?.(index, withGaps.length, row.heading);
+      summaries.push(
+        await this.resolveSectionGaps(ctx, projectId, row.sectionId, {
+          providerCredentialId: options.providerCredentialId,
+          jobId: options.jobId,
+        }),
+      );
+    }
+    await onProgress?.(withGaps.length, withGaps.length, 'done');
+    return summaries;
+  }
+
+  /**
+   * Chunks from the same project that mention what this section is about.
+   *
+   * Retrieval maps a handful of chunks per section, chosen for writing it — which
+   * is not the same set as the chunks that could VERIFY it. The addressing table
+   * was mapped only the DHCP-pool screenshots, so the interface masks that the
+   * routing captures show were "not in the evidence" even though the project had
+   * them all along.
+   *
+   * Selection is by keyword overlap with the heading, capped, and mapped chunks are
+   * excluded so nothing is read twice.
+   */
+  private async chunksNearSubject(
+    ctx: AuthContext,
+    projectId: string,
+    heading: string,
+    excludeIds: readonly string[],
+  ): Promise<Array<{ text: string; documentName: string; page: number | null }>> {
+    const MAX_EXTRA_CHUNKS = 24;
+    const tokens = [
+      ...new Set(
+        heading
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((token) => token.length > 3),
+      ),
+    ];
+    if (tokens.length === 0) return [];
+
+    const excluded = new Set(excludeIds);
+    const rows = await this.db
+      .select({
+        id: extractedChunks.id,
+        text: extractedChunks.text,
+        documentName: documents.originalName,
+        page: extractedChunks.page,
+      })
+      .from(extractedChunks)
+      .innerJoin(documents, eq(documents.id, extractedChunks.documentId))
+      .where(and(eq(extractedChunks.userId, ctx.userId), eq(documents.projectId, projectId)));
+
+    return rows
+      .filter((row) => !excluded.has(row.id))
+      .map((row) => {
+        const text = (row.text ?? '').toLowerCase();
+        const score = tokens.reduce((sum, token) => (text.includes(token) ? sum + 1 : sum), 0);
+        return { row, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_EXTRA_CHUNKS)
+      .map((entry) => entry.row);
+  }
+
+  /**
+   * Loads the screenshots that could hold a section's missing values.
+   *
+   * Chosen by keyword overlap with the heading and the gap questions rather than
+   * by "every image in the project": a report can hold dozens of screenshots, and
+   * sending all of them would blow the context window while burying the relevant
+   * one. Images whose OCR text is empty are still eligible — those are exactly the
+   * ones the text could not answer from.
+   */
+  private async loadGapImages(
+    ctx: AuthContext,
+    projectId: string,
+    heading: string,
+    markers: readonly { marker: string }[],
+  ): Promise<Array<{ documentName: string; mediaType: string; base64: string }>> {
+    // The addressing table asks about four interfaces at once, and one capture per
+    // interface is needed to answer them. Four was not enough: the routing captures
+    // that hold the masks sorted below four pool screenshots and never travelled.
+    const MAX_IMAGES = 8;
+    const rows = await this.db
+      .select({
+        id: documents.id,
+        name: documents.originalName,
+        mimeType: documents.mimeType,
+        storageKey: documents.storageKey,
+        text: sql<string>`coalesce((select string_agg(c.text, ' ') from extracted_chunks c where c.document_id = ${documents.id}), '')`,
+      })
+      .from(documents)
+      .where(
+        and(
+          eq(documents.userId, ctx.userId),
+          eq(documents.projectId, projectId),
+          sql`${documents.mimeType} like 'image/%'`,
+        ),
+      );
+
+    const tokens = new Set(
+      `${heading} ${markers.map((marker) => marker.marker).join(' ')}`
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length > 2),
+    );
+    const scored = rows
+      .filter((row) => /^image\/(png|jpeg|gif|webp)$/i.test(row.mimeType ?? ''))
+      .map((row) => {
+        const text = (row.text ?? '').toLowerCase();
+        let score = 0;
+        for (const token of tokens) if (text.includes(token)) score += 1;
+        // No OCR text at all is a strong hint that this image was never readable as
+        // text — the case where vision is the only way to use it.
+        if (!text.trim()) score += 0.5;
+        return { row, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_IMAGES);
+
+    const loaded: Array<{ documentName: string; mediaType: string; base64: string }> = [];
+    for (const { row } of scored) {
+      try {
+        const bytes = await this.storage.get(row.storageKey);
+        loaded.push({
+          documentName: row.name,
+          mediaType: (row.mimeType ?? 'image/png').toLowerCase(),
+          base64: Buffer.from(bytes).toString('base64'),
+        });
+      } catch {
+        // A missing file must not fail the whole pass; the text evidence may still
+        // resolve some markers.
+      }
+    }
+    return loaded;
   }
 
   /**

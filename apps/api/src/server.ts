@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+﻿import Fastify, { type FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
 import type { AppConfig } from './config.js';
 import { createDb, type DbHandle, type Database } from './db/client.js';
@@ -116,7 +116,7 @@ export async function buildServer(options: BuildServerOptions): Promise<BuiltSer
   const facts = new FactService(db);
   const usage = new UsageService(db);
   const mapping = new MappingService(db, config, credentials, facts, registry);
-  const generation = new GenerationService(db, config, credentials, mapping, usage, facts, registry);
+  const generation = new GenerationService(db, config, credentials, mapping, usage, facts, registry, storage);
   const exports = new ExportService(db, storage, config);
   const jobs = new JobService(db, config.JOB_MAX_ATTEMPTS);
 

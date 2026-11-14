@@ -428,6 +428,62 @@ export function ProjectWorkspacePage() {
     [projectId],
   );
 
+  /**
+   * Resolves the `[PERLU DICEK]` markers from the sources and waits for the job.
+   *
+   * The reply has to carry the real outcome: how many values were found, how many
+   * are still unproven, and which ones. Saying "verification started" would leave
+   * the user unable to tell an honest leftover gap from a failed run.
+   */
+  const resolveGapsForChat = useCallback(async () => {
+    try {
+      const response = await api.post<{ jobId: string }>(`/api/projects/${projectId}/resolve-gaps`, {
+        providerCredentialId: selectedProviderId ?? undefined,
+      });
+      polling.refresh();
+
+      const deadline = Date.now() + 10 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        const job = await api.get<{
+          job: {
+            status: string;
+            errorMessage?: string | null;
+            result?: {
+              found?: number;
+              resolved?: number;
+              sections?: Array<{
+                heading: string;
+                found: number;
+                resolved: number;
+                remaining: Array<{ marker: string; reason: string }>;
+                imageDerived?: Array<{ marker: string; value: string; documentName: string }>;
+              }>;
+            };
+          };
+        }>(`/api/projects/${projectId}/jobs/${response.jobId}`);
+        const status = job.job?.status;
+        if (status !== 'succeeded' && status !== 'failed') continue;
+        if (status === 'failed') {
+          return {
+            ok: false,
+            message: job.job.errorMessage?.trim() || 'The verification job failed.',
+          };
+        }
+        const result = job.job.result ?? {};
+        return {
+          ok: true,
+          found: Number(result.found ?? 0),
+          resolved: Number(result.resolved ?? 0),
+          sections: result.sections ?? [],
+        };
+      }
+      return { ok: false, message: 'Verification did not finish in time.' };
+    } catch (error) {
+      return { ok: false, message: errorMessage(error) };
+    }
+  }, [projectId, selectedProviderId, polling]);
+
   const hasMapping = (mappings ?? []).length > 0;
   const visibleSections = (outline ?? []).filter((section) => !section.excluded);
   const hasSections = visibleSections.length > 0;
@@ -775,6 +831,7 @@ export function ProjectWorkspacePage() {
           onOpenOutline={() => setOutlineOpen(true)}
           onRunPipeline={runPipelineForChat}
           onExport={exportForChat}
+          onResolveGaps={resolveGapsForChat}
           onChanged={() => {
             void loadAll();
             polling.refresh();

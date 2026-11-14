@@ -1,5 +1,6 @@
 import {
   fetchWithTimeout,
+  messageText,
   normalizeBaseUrl,
   parseErrorResponse,
   ProviderError,
@@ -36,10 +37,27 @@ export class AnthropicAdapter implements ProviderAdapter {
     const version = config.requestSettings?.apiVersion ?? ANTHROPIC_VERSION;
     const started = Date.now();
 
-    const systemParts = request.messages.filter((m) => m.role === 'system').map((m) => m.content);
+    const systemParts = request.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => messageText(m.content));
+    // Anthropic expects images as `image` blocks with a base64 source, positioned
+    // before the text that refers to them. Text-only messages stay a plain string.
     const conversation = request.messages
       .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content:
+          typeof m.content === 'string'
+            ? m.content
+            : m.content.map((part) =>
+                part.type === 'text'
+                  ? { type: 'text', text: part.text }
+                  : {
+                      type: 'image',
+                      source: { type: 'base64', media_type: part.mediaType, data: part.base64 },
+                    },
+              ),
+      }));
 
     const body: Record<string, unknown> = {
       model: config.model,

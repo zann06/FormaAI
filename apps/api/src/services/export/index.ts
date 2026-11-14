@@ -83,6 +83,156 @@ export const COVER_PROMPTS = [
 ] as const;
 
 /**
+ * Words that tell us WHAT KIND of date a template is asking for.
+ *
+ * They matter because the two dates are not interchangeable: a report is written
+ * on one day and handed in on another, so filling "Tanggal Pengumpulan" with the
+ * generation date would be a silent factual error on the cover — exactly the kind
+ * of fabrication this codebase refuses to do. Each template words its label
+ * differently ("Tanggal Pengumpulan", "Tanggal Praktikum", "Periode"), so the
+ * label is read from the document instead of assuming one spelling.
+ */
+const SUBMISSION_DATE_WORDS = [
+  'pengumpulan',
+  'pengiriman',
+  'penyerahan',
+  'submission',
+  'submit',
+  'deadline',
+  'batas',
+  'tenggat',
+];
+
+export type CoverDateKind = 'generated' | 'submission' | 'unknown';
+
+/**
+ * Classifies the label that precedes a date prompt.
+ *
+ * Returns `generated` only for labels that clearly mean "when this document was
+ * produced" (`Tanggal Pembuatan`, `Tanggal Penyusunan`, `Tanggal Pembuatan
+ * Laporan`). Anything about handing the work in is `submission`. A label we do
+ * not recognise stays `unknown` and is never filled — an empty line the user can
+ * see beats a plausible-looking wrong date.
+ */
+export function classifyCoverDateLabel(label: string | null | undefined): CoverDateKind {
+  const text = (label ?? '').toLowerCase();
+  if (!text) return 'unknown';
+  if (SUBMISSION_DATE_WORDS.some((word) => text.includes(word))) return 'submission';
+  if (/pembuatan|penyusunan|dibuat|disusun|dibuat pada|created|generated|prepared/.test(text)) {
+    return 'generated';
+  }
+  return 'unknown';
+}
+
+/**
+ * Finds the label sitting immediately before a fill-in prompt.
+ *
+ * Cover lines read `Tanggal Pengumpulan : [ Tuliskan Tanggal Pengumpulan ]`, so
+ * the label is whatever short span precedes the prompt on the same line. Only the
+ * tail of that span is used (max 60 chars, stopping at a newline or a previous
+ * `:`), otherwise an earlier line's text would leak into the classification.
+ */
+export function labelBeforePrompt(documentText: string, prompt: string): string | null {
+  const index = documentText.indexOf(prompt);
+  if (index === -1) return null;
+  const before = documentText.slice(Math.max(0, index - 120), index);
+  // Collapse the template's padding so "Tanggal   Pengumpulan  :" reads normally.
+  const flat = before.replace(/[ \t\u00a0]+/g, ' ');
+  const lineStart = Math.max(flat.lastIndexOf('\n'), flat.lastIndexOf('\r'));
+  const sameLine = flat.slice(lineStart + 1);
+  // A cover line is `Label : value`, so the separator marks where the label ENDS.
+  // Cutting at it and keeping what follows would return the empty gap between the
+  // colon and the prompt, which classifies as "unknown" and blocks every fill.
+  const lastColon = sameLine.lastIndexOf(':');
+  const label = lastColon === -1 ? sameLine : sameLine.slice(0, lastColon);
+  const trimmed = label.trim().slice(-60);
+  return trimmed || null;
+}
+
+/**
+ * Lists every `[ ... ]` fill-in prompt that looks like a date request.
+ *
+ * The known `[ Tuliskan Tanggal Pengumpulan ]` prompt is only one wording; other
+ * templates use `[ Tanggal ]`, `[ dd/mm/yyyy ]` or ask for a period. Matching on
+ * the bracketed text keeps this from touching unrelated prompts such as
+ * `[ Tuliskan NIM Anda ]`, which the identity fields handle.
+ */
+export function datePromptsIn(documentText: string): Array<{ prompt: string; kind: CoverDateKind }> {
+  const found: Array<{ prompt: string; kind: CoverDateKind }> = [];
+  const seen = new Set<string>();
+  for (const match of documentText.matchAll(/\[[^\]\n]{1,60}\]/g)) {
+    const prompt = match[0];
+    if (seen.has(prompt)) continue;
+    // Only prompts that talk about a date at all; "[ ... ]" and "[ LULUS / REVISI ]"
+    // are assessed/rubric fields and must be left alone.
+    const looksLikeDate =
+      /tanggal|date|periode|period|dd\s*\/\s*mm|dd-mm|hari\s*\/|tgl/i.test(prompt) ||
+      /\btanggal\b/i.test(labelBeforePrompt(documentText, prompt) ?? '');
+    if (!looksLikeDate) continue;
+    seen.add(prompt);
+    found.push({ prompt, kind: classifyCoverDateLabel(labelBeforePrompt(documentText, prompt)) });
+  }
+  return found;
+}
+
+/**
+ * Formats an export date the way Indonesian reports write it.
+ *
+ * `2026-11-13` reads like a database value on a cover; `13 November 2026` reads
+ * like a report. Both the DOCX date (`yyyy-mm-dd` in placeholders) and this
+ * human form are produced from the same instant so a cover and its footer agree.
+ */
+export function formatCoverDate(when: Date): string {
+  const months = [
+    'Januari',
+    'Februari',
+    'Maret',
+    'April',
+    'Mei',
+    'Juni',
+    'Juli',
+    'Agustus',
+    'September',
+    'Oktober',
+    'November',
+    'Desember',
+  ];
+  // Rendered in local time: the user writing the report sees their own calendar
+  // date, not a UTC one that can be a day behind or ahead.
+  return `${when.getDate()} ${months[when.getMonth()]} ${when.getFullYear()}`;
+}
+
+/**
+ * Builds the literal replacements for date prompts, honouring their labels.
+ *
+ * `submission` and `unknown` labels are deliberately skipped: this returns only
+ * the replacements it can support, and `dateFieldsStillBlank` reports the rest so
+ * the assistant can ask for them instead of guessing.
+ */
+export function coverDateReplacements(
+  documentText: string,
+  when: Date,
+): Array<{ find: string; replace: string }> {
+  const value = formatCoverDate(when);
+  const replacements: Array<{ find: string; replace: string }> = [];
+  for (const { prompt, kind } of datePromptsIn(documentText)) {
+    if (kind === 'generated') replacements.push({ find: prompt, replace: value });
+  }
+  return replacements;
+}
+
+/**
+ * Names the date prompts that are still unfilled, and why.
+ *
+ * Returned so the export warning can distinguish "we had no date to fill" from
+ * "this template wants a submission date the user never supplied" — the second
+ * one is a question for the user, not a bug to retry.
+ */
+export function dateFieldsStillBlank(documentText: string): Array<{ prompt: string; kind: CoverDateKind }> {
+  return datePromptsIn(documentText).filter((entry) => entry.kind !== 'generated');
+}
+
+/**
  * Names the cover fields still unfilled in an assembled document.
  *
  * Export used to leave these prompts in the file silently, so a finished report
@@ -120,6 +270,28 @@ export function identityReplacements(instructions: string | null): Array<{ find:
   add(COVER_PROMPTS[2].find, fields.kelas ?? fields.class);
   add(COVER_PROMPTS[3].find, fields.tanggal ?? fields.date);
   return replacements;
+}
+
+/**
+ * Extracts the visible text of a DOCX template.
+ *
+ * Only used to read cover labels (`Tanggal Pengumpulan :`) so date prompts can be
+ * classified by what they actually ask for. Tags are stripped rather than parsed
+ * into a tree because the only question is "which words sit beside this prompt",
+ * and the raw XML is already in memory.
+ */
+export function templatePlainText(bytes: Uint8Array): string {
+  try {
+    const pkg = readDocxPackage(bytes);
+    const xml = pkg.files['word/document.xml'];
+    if (!xml) return '';
+    return xmlToString(xml)
+      .replace(/<w:p[ >]/g, '\n<w:p ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\u00a0/g, ' ');
+  } catch {
+    return '';
+  }
 }
 
 export class ExportService {
@@ -299,13 +471,21 @@ export class ExportService {
 
     const templateBytes = await this.storage.get(template.storageKey);
     const figures = await this.loadFigures(ctx, rows);
+    // Read the template's own cover text so date prompts can be classified by the
+    // label beside them. Without this the exporter has to guess what "Tanggal"
+    // means, and guessing is how a submission date ends up filled with today.
+    const templateText = templatePlainText(templateBytes);
+    const exportDate = new Date();
     const result = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project?.title ?? '',
         report_type: project?.reportType ?? '',
-        generated_date: new Date().toISOString().slice(0, 10),
+        generated_date: exportDate.toISOString().slice(0, 10),
       },
-      textReplacements: identityReplacements(project?.instructions ?? null),
+      textReplacements: [
+        ...identityReplacements(project?.instructions ?? null),
+        ...coverDateReplacements(templateText, exportDate),
+      ],
       sections: rows.map((row) => ({
         sectionId: row.sectionId,
         headingText: row.heading,
@@ -347,12 +527,25 @@ export class ExportService {
     // A blank cover is a question, not a failure: the file is valid and complete,
     // but the assistant must ask for the identity instead of shipping placeholders
     // without a word. The chat reads this from the export job and asks the user.
-    const coverStillMissing = missingCoverFields(docXml.replace(/<[^>]+>/g, ''));
+    const exportedText = docXml.replace(/<[^>]+>/g, '');
+    const coverStillMissing = missingCoverFields(exportedText);
     if (coverStillMissing.length > 0) {
       warnings.push(
         `Cover details are still blank in the exported document: ${coverStillMissing.join(
           ', ',
         )}. Ask the user for them and rebuild rather than inventing values.`,
+      );
+    }
+
+    // Date prompts are filled automatically ONLY where the template's own label
+    // says the date is when the report was produced. A submission date is the
+    // user's fact, so it is reported as a question with the exact wording of the
+    // prompt, letting the assistant ask "kapan tanggal pengumpulannya?" instead of
+    // stamping today's date on a cover that would then be wrong.
+    for (const entry of dateFieldsStillBlank(exportedText)) {
+      warnings.push(
+        `The template asks for "${entry.prompt}", and the label beside it is not a ` +
+          `generation date. Ask the user for that date; do not substitute today's.`,
       );
     }
     if (verification.headings.length !== result.fidelity.templateHeadings) {
@@ -419,12 +612,20 @@ export class ExportService {
 
     const templateBytes = await this.storage.get(template.storageKey);
     const figures = await this.loadFigures(ctx, rows);
+    // Same cover treatment as the real export, so what the user previews and what
+    // they download cannot disagree about the date on the cover.
+    const templateText = templatePlainText(templateBytes);
+    const exportDate = new Date();
     const assembled = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project.title ?? '',
         report_type: project.reportType ?? '',
-        generated_date: new Date().toISOString().slice(0, 10),
+        generated_date: exportDate.toISOString().slice(0, 10),
       },
+      textReplacements: [
+        ...identityReplacements(project.instructions ?? null),
+        ...coverDateReplacements(templateText, exportDate),
+      ],
       sections: rows.map((row) => ({
         sectionId: row.sectionId,
         headingText: row.heading,

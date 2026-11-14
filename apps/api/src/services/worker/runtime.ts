@@ -1,4 +1,4 @@
-import type { Database } from '../../db/client.js';
+﻿import type { Database } from '../../db/client.js';
 import type { AppConfig } from '../../config.js';
 import type { AuthContext } from '../auth/index.js';
 import { JobService } from '../jobs/index.js';
@@ -56,7 +56,7 @@ export function createServices(input: {
   const usage = new UsageService(db);
   const credentials = new CredentialService(db, config, registry);
   const mapping = new MappingService(db, config, credentials, facts, registry);
-  const generation = new GenerationService(db, config, credentials, mapping, usage, facts, registry);
+  const generation = new GenerationService(db, config, credentials, mapping, usage, facts, registry, storage);
   const exports = new ExportService(db, storage, config);
   return {
     db,
@@ -274,6 +274,30 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
           const firstError = result.results.find((r) => !r.ok)?.error ?? 'All sections failed';
           throw new ApiErrorWithCode('GENERATION_FAILED', firstError);
         }
+        break;
+      }
+      case 'resolve_gaps': {
+        const payload = job.payload as { sectionIds?: string[]; providerCredentialId?: string };
+        await markStage('reading the evidence', 5);
+        const summaries = await services.generation.resolveManyGaps(
+          ctx,
+          job.projectId,
+          {
+            sectionIds: payload.sectionIds,
+            providerCredentialId: payload.providerCredentialId,
+            jobId,
+          },
+          async (done, total, heading) => {
+            await markStage(`verifying: ${heading}`.slice(0, 60), Math.round((done / Math.max(1, total)) * 100));
+          },
+        );
+        await markStage('done', 100);
+        const resolved = summaries.reduce((sum, entry) => sum + entry.resolved, 0);
+        const found = summaries.reduce((sum, entry) => sum + entry.found, 0);
+        await db
+          .update(processingJobs)
+          .set({ result: { found, resolved, sections: summaries } })
+          .where(eq(processingJobs.id, jobId));
         break;
       }
       case 'run_pipeline': {

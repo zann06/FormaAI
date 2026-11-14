@@ -24,6 +24,12 @@ export interface JobPayloads {
     exportFormats?: Array<'docx' | 'pdf'>;
     regenerateExisting?: boolean;
   };
+  /**
+   * Fills `[PERLU DICEK]` / `[MISSING]` markers from the evidence, re-reading the
+   * source images. Separate from generation because it happens after the user has
+   * seen the markers and asked for them to be verified.
+   */
+  resolve_gaps: { sectionIds?: string[]; providerCredentialId?: string };
   assemble_docx: { exportId: string };
   convert_pdf: { exportId: string; docxExportId: string; dependsOnJobId?: string };
   cleanup: { kind: 'sessions' | 'exports' | 'credentials' };

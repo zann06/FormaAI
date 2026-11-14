@@ -183,6 +183,7 @@ export function ChatPanel({
   onOpenOutline,
   onRunPipeline,
   onExport,
+  onResolveGaps,
   onChanged,
 }: {
   projectId: string;
@@ -196,6 +197,20 @@ export function ChatPanel({
   /** Runs the full pipeline; resolves with the job's steps for the trail. */
   onRunPipeline: () => Promise<{ summary: string; steps: Array<{ name: string; status: string; message?: string }> } | null>;
   onExport: (format: 'docx' | 'pdf') => Promise<{ ok: boolean; message: string; missingCoverFields?: string[] }>;
+  /** Re-reads the sources to fill the `[PERLU DICEK]` markers. */
+  onResolveGaps: () => Promise<{
+    ok: boolean;
+    message?: string;
+    found?: number;
+    resolved?: number;
+    sections?: Array<{
+      heading: string;
+      found: number;
+      resolved: number;
+      remaining: Array<{ marker: string; reason: string }>;
+      imageDerived?: Array<{ marker: string; value: string; documentName: string }>;
+    }>;
+  }>;
   onChanged: () => void;
 }) {
   const toast = useToast();
@@ -439,6 +454,81 @@ export function ChatPanel({
           onChanged();
           return;
         }
+        case 'resolve-gaps': {
+          appendSteps(replyId, [
+            {
+              tone: 'thinking',
+              text: 'Re-reading your sources — text and screenshots — for the values marked unverified.',
+            },
+          ]);
+          const outcome = await onResolveGaps();
+          if (!outcome.ok) {
+            appendSteps(replyId, [{ tone: 'error', text: outcome.message ?? 'Verification failed.' }]);
+            patch(replyId, {
+              text: 'I could not verify the unverified values, so every marker stays exactly as it was. Nothing was changed.',
+              pending: false,
+            });
+            return;
+          }
+          const sections = outcome.sections ?? [];
+          const touched = sections.filter((section) => section.found > 0);
+          const remaining = sections.reduce((sum, section) => sum + section.remaining.length, 0);
+          const imageDerived = sections.flatMap((section) =>
+            (section.imageDerived ?? []).map((entry) => ({ ...entry, heading: section.heading })),
+          );
+          const remainingPreview = sections
+            .flatMap((section) =>
+              section.remaining.map((entry) => ({ ...entry, heading: section.heading })),
+            )
+            .slice(0, 5);
+
+          appendSteps(replyId, [
+            {
+              tone: 'result',
+              text:
+                touched.length === 0
+                  ? 'No section currently has an unverified value.'
+                  : `Checked ${outcome.found ?? 0} unverified value(s) across ${touched.length} section(s).`,
+            },
+            ...(outcome.resolved
+              ? [{ tone: 'result' as const, text: `Filled ${outcome.resolved} from the evidence.` }]
+              : []),
+            ...(imageDerived.length > 0
+              ? [
+                  {
+                    tone: 'warn' as const,
+                    text: `Read from a screenshot, so check against the original: ${imageDerived
+                      .slice(0, 4)
+                      .map((entry) => `${entry.value} (${entry.heading})`)
+                      .join('; ')}.`,
+                  },
+                ]
+              : []),
+            ...(remaining > 0
+              ? [
+                  { tone: 'warn' as const, text: `${remaining} value(s) stay marked — the sources do not prove them:` },
+                  ...remainingPreview.map((entry) => ({
+                    tone: 'warn' as const,
+                    text: `${entry.marker} — ${entry.reason}`,
+                  })),
+                ]
+              : []),
+          ]);
+
+          patch(replyId, {
+            text:
+              (outcome.found ?? 0) === 0
+                ? 'There is nothing marked unverified right now.'
+                : remaining === 0
+                  ? 'Every unverified value is now filled from your sources. The preview on the right shows the updated document.'
+                  : outcome.resolved
+                    ? `Filled ${outcome.resolved} value(s). ${remaining} stay marked because the sources do not contain them — tell me the values, or add a document that shows them, and I will retry.`
+                    : `I could not prove any of the ${remaining} unverified value(s) from your sources, so every marker stays. Tell me the values or add a document that shows them.`,
+            pending: false,
+          });
+          onChanged();
+          return;
+        }
         case 'open-sources':
           appendSteps(replyId, [{ tone: 'action', text: 'Opening the Sources panel.' }]);
           patch(replyId, {
@@ -526,7 +616,7 @@ export function ChatPanel({
         }
       }
     },
-    [runGenerate, onExport, onOpenSources, onOpenOutline, statusLines, context, projectId, patch, appendSteps, onChanged],
+    [runGenerate, onExport, onResolveGaps, onOpenSources, onOpenOutline, statusLines, context, projectId, patch, appendSteps, onChanged],
   );
 
   async function send() {

@@ -1,8 +1,40 @@
 import type { ProviderType } from '@formaai/shared';
 
+/**
+ * One block of a multi-modal message.
+ *
+ * Reports are built from screenshots — a Packet Tracer canvas, a CLI capture, a
+ * photographed topology — and the OCR text of those is exactly where a section
+ * ends up with `[PERLU DICEK]`. Letting a request carry the pixels alongside the
+ * text is what allows a model to read the value the OCR missed, instead of only
+ * seeing the OCR's guess.
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; base64: string };
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /**
+   * Plain text for ordinary prompts, or content parts when an image has to travel
+   * with the instruction. Every adapter accepts both, so callers do not have to
+   * know which provider will serve the request.
+   */
+  content: string | ContentPart[];
+}
+
+/** Concatenated text of a message, for logging and for adapters without vision. */
+export function messageText(content: string | ContentPart[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+/** True when a message carries at least one image. */
+export function hasImage(content: string | ContentPart[]): boolean {
+  return typeof content !== 'string' && content.some((part) => part.type === 'image');
 }
 
 export interface ProviderConfig {

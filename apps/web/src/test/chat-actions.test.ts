@@ -111,6 +111,27 @@ describe('planChatAction', () => {
       expect(planChatAction(message, context).kind).toBe('generate-all');
     }
   });
+
+  /**
+   * Verifying the `[PERLU DICEK]` markers is its own job. Routing it to the draft
+   * pipeline would rewrite supported prose — and would not fill a single marker,
+   * because generation reads the same OCR text that produced the gap.
+   */
+  it('routes a verification request to gap resolution, not to a redraft', () => {
+    for (const message of [
+      'tolong verifikasi nilai yang masih perlu dicek',
+      'cek ulang semua tanda perlu dicek',
+      'lengkapi nilai yang belum terbukti',
+      'cross-check the unverified values',
+    ]) {
+      expect(planChatAction(message, context).kind).toBe('resolve-gaps');
+    }
+  });
+
+  it('does not mistake a status question about gaps for a verification run', () => {
+    expect(planChatAction('bagian mana yang masih kosong?', context).kind).toBe('status');
+    expect(planChatAction('berapa yang belum selesai?', context).kind).toBe('status');
+  });
 });
 
 describe('identity captured from chat', () => {
@@ -256,6 +277,24 @@ describe('planChatSteps', () => {
   it('saves cover details, drafts, then exports in that order', () => {
     const steps = planChatSteps('Nama: Farid, NIM: 124140210. buatkan laporan lalu export pdf', context);
     expect(steps.map((step) => step.kind)).toEqual(['identity', 'generate-all', 'export-pdf']);
+  });
+
+  it('verifies and then exports when both are asked for', () => {
+    // The export must come after the verification, otherwise the file still
+    // contains every `[PERLU DICEK]` the user just asked to close.
+    const steps = planChatSteps('verifikasi lalu export pdf', context);
+    expect(steps.map((step) => step.kind)).toEqual(['resolve-gaps', 'export-pdf']);
+  });
+
+  it('drafts, then verifies, when both are asked for', () => {
+    const steps = planChatSteps('generate ulang lalu validasi nilai yang belum terbukti', context);
+    expect(steps.map((step) => step.kind)).toEqual(['generate-all', 'resolve-gaps']);
+  });
+
+  it('keeps a plain verification request as one step', () => {
+    const steps = planChatSteps('tolong periksa nilai yang perlu dicek', context);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.kind).toBe('resolve-gaps');
   });
 });
 

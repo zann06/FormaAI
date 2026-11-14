@@ -13,6 +13,7 @@ export type ChatActionKind =
   | 'generate-section'
   | 'export-docx'
   | 'export-pdf'
+  | 'resolve-gaps'
   | 'open-sources'
   | 'open-outline'
   | 'status'
@@ -193,6 +194,16 @@ const STATUS =
   /\b(status|progress|how (?:is|far)|berapa|sudah|ready|selesai|mana yang|kosong|missing|which (?:part|section|one)|empty|incomplete|unfinished|belum)\b/i;
 /** Words that specifically mean "open the structure view". */
 const OUTLINE = /\b(outline|struktur|daftar isi|section list|bagian mana)\b/i;
+/**
+ * Words that ask for the unverified values to be checked against the sources.
+ *
+ * Distinct from "generate": the user is not asking for a new draft, they are
+ * asking for the `[PERLU DICEK]` holes to be filled from the evidence they already
+ * supplied. Running a regeneration instead would rewrite supported prose and could
+ * easily introduce new gaps.
+ */
+const RESOLVE_GAPS =
+  /\b(perlu dicek|verifikasi|verif|cek ulang|periksa|validasi|validate|verify|cross-?check|cek lagi|isi yang kosong|lengkapi|complete the gaps|fill the gaps|unverified|tanda cek)\b/i;
 
 /**
  * Detects the intent behind a message.
@@ -224,6 +235,13 @@ export function planChatAction(message: string, context: PlannerContext): ChatAc
       text,
       label: `Regenerating “${namedHeading}”`,
     };
+  }
+
+  // Checking the unverified values comes before the generic "write the report"
+  // fallback: "lengkapi laporan ini" names the artefact but is asking to close the
+  // gaps, not to redraft prose that is already supported.
+  if (RESOLVE_GAPS.test(text) && !(GENERATE_ALL.test(text) && namedHeading)) {
+    return { kind: 'resolve-gaps', text, label: 'Checking the unverified values against your sources' };
   }
 
   // Only a genuine *question about where to put a file* opens Sources. A request
@@ -295,8 +313,9 @@ export function planChatSteps(message: string, context: PlannerContext): ChatAct
   // A pure question is answered, not executed. Doing work on "apa yang masih kosong?"
   // would be the assistant answering a question nobody asked.
   const isQuestion = asksQuestion(text);
+  const wantsResolve = RESOLVE_GAPS.test(text);
   const explicitWork =
-    GENERATE_ALL.test(text) || EXPORT.test(text) || hasIdentityFields(extractIdentity(text));
+    GENERATE_ALL.test(text) || EXPORT.test(text) || wantsResolve || hasIdentityFields(extractIdentity(text));
   if (isQuestion && !explicitWork) return [];
 
   const wantsWork = GENERATE_ALL.test(text);
@@ -324,6 +343,34 @@ export function planChatSteps(message: string, context: PlannerContext): ChatAct
           : { kind: 'generate-all', text, label: 'Drafting every section' },
       );
     }
+    if (wantsFile) {
+      steps.push({
+        kind: /\bpdf\b/i.test(text) ? 'export-pdf' : 'export-docx',
+        text,
+        label: /\bpdf\b/i.test(text) ? 'Then exporting as PDF' : 'Then exporting as DOCX',
+      });
+    }
+    return steps;
+  }
+
+  // "verifikasi lalu export" is two jobs: the verification changes the document,
+  // and the file has to be built after it, not before. Without this branch the
+  // export wins and the user gets a file still full of `[PERLU DICEK]`.
+  if (wantsResolve && (wantsWork || wantsFile)) {
+    const steps: ChatAction[] = [];
+    if (wantsWork) {
+      const namedHeading = findNamedHeading(text, context.headings);
+      steps.push(
+        namedHeading
+          ? { kind: 'generate-section', target: namedHeading, text, label: `Regenerating “${namedHeading}”` }
+          : { kind: 'generate-all', text, label: 'Drafting every section' },
+      );
+    }
+    steps.push({
+      kind: 'resolve-gaps',
+      text,
+      label: 'Checking the unverified values against your sources',
+    });
     if (wantsFile) {
       steps.push({
         kind: /\bpdf\b/i.test(text) ? 'export-pdf' : 'export-docx',

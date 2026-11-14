@@ -4,6 +4,7 @@ import {
   parseErrorResponse,
   ProviderError,
   redactSecrets,
+  type ChatMessage,
   type CompletionRequest,
   type CompletionResult,
   type ConnectionTestResult,
@@ -12,6 +13,26 @@ import {
 } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 90_000;
+
+/**
+ * Converts one message to the Chat Completions wire format.
+ *
+ * A plain string is sent as-is so existing text-only prompts stay byte-identical
+ * (and keep working with stricter gateways). A message with images becomes the
+ * multi-part array, with each image inlined as a `data:` URL because the caller
+ * already holds the bytes and has nowhere to host them.
+ */
+function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
+  if (typeof message.content === 'string') return { role: message.role, content: message.content };
+  return {
+    role: message.role,
+    content: message.content.map((part) =>
+      part.type === 'text'
+        ? { type: 'text', text: part.text }
+        : { type: 'image_url', image_url: { url: `data:${part.mediaType};base64,${part.base64}` } },
+    ),
+  };
+}
 
 interface ChatCompletionResponse {
   id?: string;
@@ -42,7 +63,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const started = Date.now();
     const body: Record<string, unknown> = {
       model: config.model,
-      messages: request.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: request.messages.map(toOpenAiMessage),
       temperature: request.temperature ?? config.requestSettings?.temperature ?? 0.2,
       max_tokens: request.maxTokens ?? config.requestSettings?.maxTokens,
       stream: false,

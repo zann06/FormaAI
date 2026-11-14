@@ -1,5 +1,6 @@
 import {
   fetchWithTimeout,
+  messageText,
   normalizeBaseUrl,
   parseErrorResponse,
   ProviderError,
@@ -72,10 +73,25 @@ export class GeminiAdapter implements ProviderAdapter {
     const started = Date.now();
     const version = config.requestSettings?.apiVersion ?? 'v1beta';
 
-    const systemParts = request.messages.filter((m) => m.role === 'system').map((m) => m.content);
+    const systemParts = request.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => messageText(m.content));
+    // Gemini takes images as `inlineData` parts next to the text, so each message
+    // becomes a mixed part list. Plain-string messages produce exactly one text
+    // part, keeping the existing text-only payload unchanged.
     const contents = request.messages
       .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts:
+          typeof m.content === 'string'
+            ? [{ text: m.content }]
+            : m.content.map((part) =>
+                part.type === 'text'
+                  ? { text: part.text }
+                  : { inlineData: { mimeType: part.mediaType, data: part.base64 } },
+              ),
+      }));
 
     const body: Record<string, unknown> = {
       contents,

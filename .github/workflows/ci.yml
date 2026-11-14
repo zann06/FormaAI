@@ -1,10 +1,14 @@
 name: CI
 
+# `master` is this repository's default branch. It was originally listed as
+# `main`, which meant no push ever matched and CI never ran — the README badge
+# pointed at a workflow with zero runs and rendered as a broken image. Both names
+# are listed so the workflow keeps working if the branch is ever renamed.
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:

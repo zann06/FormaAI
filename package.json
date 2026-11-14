@@ -14,7 +14,9 @@
   },
   "scripts": {
     "build": "npm run build --workspace @formaai/shared && npm run build --workspace @formaai/docx-engine && npm run build --workspace @formaai/ai-providers && npm run build --workspace @formaai/api && npm run build --workspace @formaai/web",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "//": "build:deps exists because workspace packages resolve each other through their built dist/ types. Consumers therefore cannot typecheck until their dependencies are compiled; on a fresh clone there is no dist/, which is why CI failed while a local tree with stale dist/ passed.",
+    "build:deps": "npm run build --workspace @formaai/shared && npm run build --workspace @formaai/docx-engine && npm run build --workspace @formaai/ai-providers",
+    "typecheck": "npm run build:deps && npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspace @formaai/api && npm run test --workspace @formaai/docx-engine && npm run test --workspace @formaai/ai-providers && npm run test --workspace @formaai/shared && npm run test --workspace @formaai/web",
     "dev": "npm run dev --workspace @formaai/api & npm run dev --workspace @formaai/web",
     "db:generate": "npm run db:generate --workspace @formaai/api",

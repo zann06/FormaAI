@@ -64,10 +64,12 @@ describe('missingCoverFields', () => {
     expect(missingCoverFields('Farid Rizky Fauzan\n124140210\nRA\n20 November 2026')).toEqual([]);
   });
 
-  it('replaces the same prompts the detector looks for', () => {
-    const replacements = identityReplacements('Nama: Farid\nNIM: 124140210\nKelas: RA\nTanggal: 20 November 2026');
+  it('replaces the identity prompts that the detector looks for', () => {
+    const replacements = identityReplacements('Nama: Farid\nNIM: 124140210\nKelas: RA');
     let filled = blankCover;
     for (const { find, replace } of replacements) filled = filled.replace(find, replace);
-    expect(missingCoverFields(filled)).toEqual([]);
+    // The submission date is not an identity field: it is filled from the export
+    // date, so it is still blank at this point and is reported as such.
+    expect(missingCoverFields(filled)).toEqual(['Tanggal']);
   });
 });

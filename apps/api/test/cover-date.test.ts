@@ -5,18 +5,18 @@ import {
   dateFieldsStillBlank,
   datePromptsIn,
   formatCoverDate,
+  identityReplacements,
   labelBeforePrompt,
 } from '../src/services/export/index.js';
 
 /**
- * Cover dates must be filled only where the template's own label says the date is
- * "when this document was produced".
+ * Cover dates are filled from the export date, but only where that is the truth.
  *
- * The tempting shortcut — fill every date prompt with today — is wrong for the most
- * common template in this app, whose label reads "Tanggal Pengumpulan" (submission
- * date). A report is written on one day and handed in on another, so stamping the
- * export date there would put a confidently wrong fact on the cover. These tests
- * pin the distinction so a later "just fill it in" change cannot quietly undo it.
+ * The submission date is the day of the export: a report finished and exported on
+ * the same day is handed in that day (the user's own rule). A deadline is not — it
+ * is the last day the work MAY be handed in, often set by the course well after the
+ * fact — so filling it with the export date would print a deadline that does not
+ * exist. These tests pin the difference so neither side drifts.
  */
 describe('cover date classification', () => {
   it('reads the label that sits beside a prompt, not the whole page', () => {
@@ -29,17 +29,23 @@ describe('cover date classification', () => {
     expect(labelBeforePrompt(text, '[ Tuliskan Tanggal Pembuatan ]')).toBe('Tanggal Pembuatan');
   });
 
-  it('treats submission wording as a submission date', () => {
+  it('treats submission wording as the day of the export', () => {
     for (const label of [
       'Tanggal Pengumpulan',
       'Tanggal Penyerahan',
       'Tanggal Pengiriman',
-      'Batas Pengumpulan',
-      'Tenggat',
+      'Dikumpulkan Pada',
       'Submission Date',
-      'Deadline',
     ]) {
       expect(classifyCoverDateLabel(label)).toBe('submission');
+    }
+  });
+
+  it('treats a limit on when it may be handed in as a deadline, not a submission', () => {
+    // "Batas Pengumpulan" contains "pengumpulan", but it is the opposite idea: a
+    // limit the course set, which the export date cannot know.
+    for (const label of ['Batas Pengumpulan', 'Tenggat Pengumpulan', 'Deadline', 'Batas Waktu Pengiriman']) {
+      expect(classifyCoverDateLabel(label)).toBe('deadline');
     }
   });
 
@@ -78,27 +84,47 @@ describe('cover date prompts', () => {
     expect(prompts).not.toContain('[ RA / RB / RC / RD ]');
   });
 
-  it('does NOT fill a submission date with the export date', () => {
-    const replacements = coverDateReplacements(cover, new Date('2026-11-13T10:00:00Z'));
-    expect(replacements).toHaveLength(0);
-    expect(dateFieldsStillBlank(cover).map((entry) => entry.prompt)).toEqual(['[ Tuliskan Tanggal Pengumpulan ]']);
+  it('fills the submission date from the export date', () => {
+    const replacements = coverDateReplacements(cover, new Date(2026, 10, 13));
+    expect(replacements).toEqual([{ find: '[ Tuliskan Tanggal Pengumpulan ]', replace: '13 November 2026' }]);
+    // Nothing is left to ask the user about.
+    expect(dateFieldsStillBlank(cover)).toHaveLength(0);
   });
 
-  it('DOES fill a generation date', () => {
+  it('follows the new day when the same project is exported again', () => {
+    // The user's rule: "semisal saya kerjain hari itu yaa berati hari itu juga".
+    // Exporting tomorrow must not keep yesterday's date on the cover.
+    const monday = coverDateReplacements(cover, new Date(2026, 10, 13));
+    const tuesday = coverDateReplacements(cover, new Date(2026, 10, 14));
+    expect(monday[0]!.replace).toBe('13 November 2026');
+    expect(tuesday[0]!.replace).toBe('14 November 2026');
+  });
+
+  it('fills a generation date the same way', () => {
     const generated = 'Tanggal Pembuatan : [ Tuliskan Tanggal Pembuatan ]';
     const replacements = coverDateReplacements(generated, new Date(2026, 10, 13));
     expect(replacements).toEqual([{ find: '[ Tuliskan Tanggal Pembuatan ]', replace: '13 November 2026' }]);
     expect(dateFieldsStillBlank(generated)).toHaveLength(0);
   });
 
-  it('fills the generated date but leaves a neighbouring submission date alone', () => {
+  it('fills both dates on a cover that carries both', () => {
     const mixed = [
       'Tanggal Pembuatan : [ Tuliskan Tanggal Pembuatan ]',
       'Tanggal Pengumpulan : [ Tuliskan Tanggal Pengumpulan ]',
     ].join('\n');
     const replacements = coverDateReplacements(mixed, new Date(2026, 10, 13));
-    expect(replacements.map((entry) => entry.find)).toEqual(['[ Tuliskan Tanggal Pembuatan ]']);
-    expect(dateFieldsStillBlank(mixed).map((entry) => entry.prompt)).toEqual(['[ Tuliskan Tanggal Pengumpulan ]']);
+    expect(replacements.map((entry) => entry.find)).toEqual([
+      '[ Tuliskan Tanggal Pembuatan ]',
+      '[ Tuliskan Tanggal Pengumpulan ]',
+    ]);
+    expect(dateFieldsStillBlank(mixed)).toHaveLength(0);
+  });
+
+  it('never fills a deadline with the export date', () => {
+    const withDeadline = 'Batas Pengumpulan : [ Tuliskan Batas Pengumpulan ]';
+    expect(coverDateReplacements(withDeadline, new Date(2026, 10, 13))).toHaveLength(0);
+    const blank = dateFieldsStillBlank(withDeadline);
+    expect(blank).toEqual([{ prompt: '[ Tuliskan Batas Pengumpulan ]', kind: 'deadline' }]);
   });
 
   it('never treats rubric or screenshot prompts as dates', () => {
@@ -122,5 +148,44 @@ describe('cover date formatting', () => {
     // Late-evening local time must not roll back a day the way toISOString can.
     const evening = new Date(2026, 10, 13, 23, 30, 0);
     expect(formatCoverDate(evening)).toBe('13 November 2026');
+  });
+});
+
+describe('submission date ownership', () => {
+  const cover = 'Tanggal Pengumpulan : [ Tuliskan Tanggal Pengumpulan ]';
+
+  it('does not read a stored date out of the instructions by default', () => {
+    // With no date stated, the cover prompt is left for the export date.
+    const replacements = identityReplacements('Nama: Farid\nNIM: 124140210\nKelas: RA');
+    expect(replacements.map((entry) => entry.find)).not.toContain('[ Tuliskan Tanggal Pengumpulan ]');
+  });
+
+  it('lets an explicitly stated date claim its prompt', () => {
+    const replacements = identityReplacements('Nama: Farid\nTanggal: 1 Desember 2026');
+    expect(replacements).toContainEqual({ find: '[ Tuliskan Tanggal Pengumpulan ]', replace: '1 Desember 2026' });
+  });
+
+  it('does not let the export date overwrite a date the user stated', () => {
+    // Both replacements target the same literal prompt, so the export-date default
+    // has to know the prompt is already taken — otherwise the date the user typed is
+    // silently swapped for the day of the export.
+    const identity = identityReplacements('Tanggal: 1 Desember 2026');
+    const auto = coverDateReplacements(
+      cover,
+      new Date(2026, 10, 14),
+      identity.map((entry) => entry.find),
+    );
+    expect(auto).toHaveLength(0);
+    expect(dateFieldsStillBlank(cover, identity.map((entry) => entry.find))).toHaveLength(0);
+  });
+
+  it('still fills the date when the user said nothing about it', () => {
+    const identity = identityReplacements('Nama: Farid');
+    const auto = coverDateReplacements(
+      cover,
+      new Date(2026, 10, 14),
+      identity.map((entry) => entry.find),
+    );
+    expect(auto).toEqual([{ find: '[ Tuliskan Tanggal Pengumpulan ]', replace: '14 November 2026' }]);
   });
 });

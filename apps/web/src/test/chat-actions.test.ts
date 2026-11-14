@@ -320,3 +320,25 @@ describe('mergeIdentity', () => {
     expect(merged).not.toContain('Name:');
   });
 });
+
+/**
+ * The submission date fills itself from the export date, so the chat must not ask
+ * for it as if the cover could not be completed without it — and must still honour
+ * a date the user states explicitly.
+ */
+describe('submission date is not a required cover field', () => {
+  it('saves a cover message without inventing a date field', () => {
+    const merged = mergeIdentity(null, { nama: 'Farid', nim: '124140210', kelas: 'RA' });
+    expect(merged).not.toContain('Tanggal:');
+    expect(merged.split('\n')).toEqual(['Nama: Farid', 'NIM: 124140210', 'Kelas: RA']);
+  });
+
+  it('keeps a date the user states explicitly as an override', () => {
+    const merged = mergeIdentity('Nama: Farid', { tanggal: '20 November 2026' });
+    expect(merged).toContain('Tanggal: 20 November 2026');
+  });
+
+  it('routes an explicit date to the identity step', () => {
+    expect(planChatAction('tanggal pengumpulan 20 November 2026', { headings: [] }).kind).toBe('identity');
+  });
+});

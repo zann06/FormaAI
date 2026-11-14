@@ -73,7 +73,10 @@ export function imageExtensionFor(
  * The literal fill-in prompts shipped by student-report templates.
  *
  * Kept next to `identityReplacements` so the strings that are replaced and the
- * strings whose absence is reported can never drift apart.
+ * strings whose absence is reported can never drift apart. The last entry is not
+ * an identity field: the submission date is filled from the export date by
+ * `coverDateReplacements`, and is listed here only so `missingCoverFields` can see
+ * it while the replacement is being built.
  */
 export const COVER_PROMPTS = [
   { field: 'Nama', find: '[ Tuliskan Nama Lengkap Anda ]' },
@@ -85,38 +88,41 @@ export const COVER_PROMPTS = [
 /**
  * Words that tell us WHAT KIND of date a template is asking for.
  *
- * They matter because the two dates are not interchangeable: a report is written
- * on one day and handed in on another, so filling "Tanggal Pengumpulan" with the
- * generation date would be a silent factual error on the cover — exactly the kind
- * of fabrication this codebase refuses to do. Each template words its label
- * differently ("Tanggal Pengumpulan", "Tanggal Praktikum", "Periode"), so the
- * label is read from the document instead of assuming one spelling.
+ * The kinds are not the same thing, and confusing them is how a cover ends up
+ * confidently wrong — exactly the fabrication this codebase refuses to do:
+ *
+ *   - `generated`: "when this document was produced" (`Tanggal Pembuatan`).
+ *   - `submission`: "the day the work is handed in" (`Tanggal Pengumpulan`). The
+ *     project rule is that this is the day of the export — a report finished and
+ *     exported on the same day is handed in that day (confirmed by the user), so
+ *     it is filled from the export date and follows it on every re-export.
+ *   - `deadline`: "the last day it MAY be handed in" (`Batas Pengumpulan`,
+ *     `Deadline`, `Tenggat`). This is NOT the day of work: it is a date set by
+ *     the course, often well after the submission. Stamping the export date here
+ *     would state a deadline that does not exist, so it stays unfilled and is
+ *     reported to the user instead.
+ *
+ * Each template words its label differently, so the label is read from the
+ * document instead of assuming one spelling.
  */
-const SUBMISSION_DATE_WORDS = [
-  'pengumpulan',
-  'pengiriman',
-  'penyerahan',
-  'submission',
-  'submit',
-  'deadline',
-  'batas',
-  'tenggat',
-];
+const DEADLINE_DATE_WORDS = ['deadline', 'batas', 'tenggat', 'due'];
 
-export type CoverDateKind = 'generated' | 'submission' | 'unknown';
+const SUBMISSION_DATE_WORDS = ['pengumpulan', 'pengiriman', 'penyerahan', 'submission', 'submit', 'dikumpulkan'];
+
+export type CoverDateKind = 'generated' | 'submission' | 'deadline' | 'unknown';
 
 /**
  * Classifies the label that precedes a date prompt.
  *
- * Returns `generated` only for labels that clearly mean "when this document was
- * produced" (`Tanggal Pembuatan`, `Tanggal Penyusunan`, `Tanggal Pembuatan
- * Laporan`). Anything about handing the work in is `submission`. A label we do
- * not recognise stays `unknown` and is never filled — an empty line the user can
- * see beats a plausible-looking wrong date.
+ * The deadline check runs first: "Batas Pengumpulan" contains "pengumpulan", but
+ * it means the opposite thing for our purposes — a limit, not the day of work.
+ * A label we do not recognise stays `unknown` and is never filled; an empty line
+ * the user can see beats a plausible-looking wrong date.
  */
 export function classifyCoverDateLabel(label: string | null | undefined): CoverDateKind {
   const text = (label ?? '').toLowerCase();
   if (!text) return 'unknown';
+  if (DEADLINE_DATE_WORDS.some((word) => text.includes(word))) return 'deadline';
   if (SUBMISSION_DATE_WORDS.some((word) => text.includes(word))) return 'submission';
   if (/pembuatan|penyusunan|dibuat|disusun|dibuat pada|created|generated|prepared/.test(text)) {
     return 'generated';
@@ -153,9 +159,15 @@ export function labelBeforePrompt(documentText: string, prompt: string): string 
  * Lists every `[ ... ]` fill-in prompt that looks like a date request.
  *
  * The known `[ Tuliskan Tanggal Pengumpulan ]` prompt is only one wording; other
- * templates use `[ Tanggal ]`, `[ dd/mm/yyyy ]` or ask for a period. Matching on
- * the bracketed text keeps this from touching unrelated prompts such as
- * `[ Tuliskan NIM Anda ]`, which the identity fields handle.
+ * templates use `[ Tanggal ]`, `[ dd/mm/yyyy ]`, ask for a period, or ask for a
+ * deadline without saying "tanggal" at all (`[ Tuliskan Batas Pengumpulan ]`).
+ * Matching on the bracketed text and the label beside it keeps this from touching
+ * unrelated prompts such as `[ Tuliskan NIM Anda ]`, which the identity fields
+ * handle.
+ *
+ * When a prompt has no label beside it, the prompt's own words are classified
+ * instead: `[ Tuliskan Batas Pengumpulan ]` on its own line still reads as a
+ * deadline, which is the case worth warning about.
  */
 export function datePromptsIn(documentText: string): Array<{ prompt: string; kind: CoverDateKind }> {
   const found: Array<{ prompt: string; kind: CoverDateKind }> = [];
@@ -164,13 +176,15 @@ export function datePromptsIn(documentText: string): Array<{ prompt: string; kin
     const prompt = match[0];
     if (seen.has(prompt)) continue;
     // Only prompts that talk about a date at all; "[ ... ]" and "[ LULUS / REVISI ]"
-    // are assessed/rubric fields and must be left alone.
+    // are assessed/rubric fields and must be left alone. Deadline wording counts as a
+    // date request even without the word "tanggal": "Batas Pengumpulan" asks for a
+    // date, and it is the case that most needs to be reported rather than filled.
     const looksLikeDate =
-      /tanggal|date|periode|period|dd\s*\/\s*mm|dd-mm|hari\s*\/|tgl/i.test(prompt) ||
-      /\btanggal\b/i.test(labelBeforePrompt(documentText, prompt) ?? '');
+      /tanggal|date|periode|period|dd\s*\/\s*mm|dd-mm|hari\s*\/|tgl|deadline|batas|tenggat|due/i.test(prompt) ||
+      /\b(tanggal|deadline|batas|tenggat|due)\b/i.test(labelBeforePrompt(documentText, prompt) ?? '');
     if (!looksLikeDate) continue;
     seen.add(prompt);
-    found.push({ prompt, kind: classifyCoverDateLabel(labelBeforePrompt(documentText, prompt)) });
+    found.push({ prompt, kind: classifyCoverDateLabel(labelBeforePrompt(documentText, prompt) ?? prompt) });
   }
   return found;
 }
@@ -205,18 +219,27 @@ export function formatCoverDate(when: Date): string {
 /**
  * Builds the literal replacements for date prompts, honouring their labels.
  *
- * `submission` and `unknown` labels are deliberately skipped: this returns only
- * the replacements it can support, and `dateFieldsStillBlank` reports the rest so
- * the assistant can ask for them instead of guessing.
+ * `generated` and `submission` prompts are both filled with the export date: the
+ * report is produced and handed in on the same day. `deadline` and `unknown`
+ * labels are deliberately skipped — a deadline is the course's fact, not ours, so
+ * `dateFieldsStillBlank` reports the rest and the assistant asks instead of
+ * guessing.
+ *
+ * `alreadyFilled` lists prompts a manual replacement has taken care of. Without
+ * it, a date the user typed into the chat would be replaced again by the export
+ * date, because both replacements target the same literal prompt.
  */
 export function coverDateReplacements(
   documentText: string,
   when: Date,
+  alreadyFilled: readonly string[] = [],
 ): Array<{ find: string; replace: string }> {
   const value = formatCoverDate(when);
+  const claimed = new Set(alreadyFilled);
   const replacements: Array<{ find: string; replace: string }> = [];
   for (const { prompt, kind } of datePromptsIn(documentText)) {
-    if (kind === 'generated') replacements.push({ find: prompt, replace: value });
+    if (claimed.has(prompt)) continue;
+    if (kind === 'generated' || kind === 'submission') replacements.push({ find: prompt, replace: value });
   }
   return replacements;
 }
@@ -224,12 +247,18 @@ export function coverDateReplacements(
 /**
  * Names the date prompts that are still unfilled, and why.
  *
- * Returned so the export warning can distinguish "we had no date to fill" from
- * "this template wants a submission date the user never supplied" — the second
- * one is a question for the user, not a bug to retry.
+ * Returned so the export warning can distinguish "this is a deadline only the
+ * user knows" from "this label is unrecognised and must not be guessed".
+ * `filled` lists prompts that a replacement already covered; they are not blank.
  */
-export function dateFieldsStillBlank(documentText: string): Array<{ prompt: string; kind: CoverDateKind }> {
-  return datePromptsIn(documentText).filter((entry) => entry.kind !== 'generated');
+export function dateFieldsStillBlank(
+  documentText: string,
+  filled: readonly string[] = [],
+): Array<{ prompt: string; kind: CoverDateKind }> {
+  const claimed = new Set(filled);
+  return datePromptsIn(documentText).filter(
+    (entry) => entry.kind !== 'generated' && entry.kind !== 'submission' && !claimed.has(entry.prompt),
+  );
 }
 
 /**
@@ -252,6 +281,12 @@ export function missingCoverFields(documentText: string): string[] {
  * strings are replaced. `instructions` is where the identity is kept as
  * `Nama: …`, `NIM: …`, `Kelas: …` lines; anything else in there is ordinary
  * guidance and is left alone.
+ *
+ * The submission date is filled from the export date by `coverDateReplacements`,
+ * so it is normally NOT read from here. It is read as an override only when the
+ * user stated one explicitly ("tanggal pengumpulan 20 November 2026"): an explicit
+ * instruction from the author beats the default, and the export skips the default
+ * when this replaced the prompt first.
  */
 export function identityReplacements(instructions: string | null): Array<{ find: string; replace: string }> {
   if (!instructions) return [];
@@ -473,9 +508,12 @@ export class ExportService {
     const figures = await this.loadFigures(ctx, rows);
     // Read the template's own cover text so date prompts can be classified by the
     // label beside them. Without this the exporter has to guess what "Tanggal"
-    // means, and guessing is how a submission date ends up filled with today.
+    // means, and guessing is how a deadline ends up filled with the export date.
     const templateText = templatePlainText(templateBytes);
     const exportDate = new Date();
+    // The identity first: a date the user stated explicitly claims its prompt, so
+    // the export-date default must not overwrite it.
+    const identity = identityReplacements(project?.instructions ?? null);
     const result = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project?.title ?? '',
@@ -483,8 +521,12 @@ export class ExportService {
         generated_date: exportDate.toISOString().slice(0, 10),
       },
       textReplacements: [
-        ...identityReplacements(project?.instructions ?? null),
-        ...coverDateReplacements(templateText, exportDate),
+        ...identity,
+        ...coverDateReplacements(
+          templateText,
+          exportDate,
+          identity.map((entry) => entry.find),
+        ),
       ],
       sections: rows.map((row) => ({
         sectionId: row.sectionId,
@@ -537,15 +579,21 @@ export class ExportService {
       );
     }
 
-    // Date prompts are filled automatically ONLY where the template's own label
-    // says the date is when the report was produced. A submission date is the
-    // user's fact, so it is reported as a question with the exact wording of the
-    // prompt, letting the assistant ask "kapan tanggal pengumpulannya?" instead of
-    // stamping today's date on a cover that would then be wrong.
-    for (const entry of dateFieldsStillBlank(exportedText)) {
+    // The submission date is filled from the export date (the report is produced
+    // and handed in the same day), so no warning is raised for it: a question about
+    // a date that is already printed on the cover is noise. What is left here is a
+    // deadline — a date set by the course that only the user knows — or a label this
+    // exporter does not recognise, which must be asked about rather than guessed.
+    for (const entry of dateFieldsStillBlank(
+      exportedText,
+      identity.map((row) => row.find),
+    )) {
       warnings.push(
-        `The template asks for "${entry.prompt}", and the label beside it is not a ` +
-          `generation date. Ask the user for that date; do not substitute today's.`,
+        entry.kind === 'deadline'
+          ? `The template asks for "${entry.prompt}", which is a deadline (the last day it may be handed ` +
+              `in), not the day it was submitted. Ask the user for that date; do not fill it with the export date.`
+          : `The template asks for "${entry.prompt}", and the label beside it is not a date this exporter ` +
+              `can fill on its own. Ask the user for that date; do not guess.`,
       );
     }
     if (verification.headings.length !== result.fidelity.templateHeadings) {
@@ -616,6 +664,7 @@ export class ExportService {
     // they download cannot disagree about the date on the cover.
     const templateText = templatePlainText(templateBytes);
     const exportDate = new Date();
+    const identity = identityReplacements(project.instructions ?? null);
     const assembled = assembleDocx(templateBytes, {
       globalPlaceholders: {
         report_title: project.title ?? '',
@@ -623,8 +672,12 @@ export class ExportService {
         generated_date: exportDate.toISOString().slice(0, 10),
       },
       textReplacements: [
-        ...identityReplacements(project.instructions ?? null),
-        ...coverDateReplacements(templateText, exportDate),
+        ...identity,
+        ...coverDateReplacements(
+          templateText,
+          exportDate,
+          identity.map((entry) => entry.find),
+        ),
       ],
       sections: rows.map((row) => ({
         sectionId: row.sectionId,

@@ -44,6 +44,9 @@ export interface ChatAction {
  *
  * Keys match what `identityReplacements()` reads from `projects.instructions`, so
  * whatever is captured here lands in the exported cover without another mapping.
+ * `tanggal` is the one exception: the submission date is filled from the export
+ * date by default, and is only stored here when the user states one explicitly —
+ * an explicit statement beats the default.
  */
 export type IdentityField = 'nama' | 'nim' | 'kelas' | 'tanggal';
 

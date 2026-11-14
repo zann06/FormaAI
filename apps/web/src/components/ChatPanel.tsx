@@ -221,7 +221,13 @@ export function ChatPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setMessages(readStored<ChatMessage[]>(MESSAGES_KEY(projectId), []));
+    // Never restore a reply that was still pending when the page closed: its
+    // steps stop mid-conversation ("Reading your message…") and can never finish,
+    // so the transcript would open with a permanently spinning trail. Dropping it
+    // also means a restored conversation cannot contain a half-written reply that
+    // would render an extra reasoning trail next to a new one.
+    const stored = readStored<ChatMessage[]>(MESSAGES_KEY(projectId), []);
+    setMessages(stored.filter((message) => !message.pending));
   }, [projectId]);
 
   useEffect(() => {

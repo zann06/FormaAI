@@ -23,6 +23,13 @@ export async function applyMigrationsToSchema(
       [schema],
     );
     await client.query('begin');
+    // `drizzle` is a single shared schema, not a per-test one. Every parallel test
+    // file runs this line, and `create schema if not exists` is NOT atomic: two
+    // connections can both observe "does not exist" and both issue CREATE, so the
+    // loser fails with `duplicate key value violates unique constraint
+    // pg_namespace_nspname_index`. Serialise just this statement with an advisory
+    // lock so the check-then-create happens once at a time.
+    await client.query(`select pg_advisory_xact_lock(hashtext('formaai_test_drizzle_schema'))`);
     await client.query('create schema if not exists drizzle');
     await client.query(
       `create table if not exists drizzle.__drizzle_migrations (

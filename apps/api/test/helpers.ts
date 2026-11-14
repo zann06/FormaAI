@@ -53,7 +53,13 @@ function withSearchPath(connectionString: string, schema: string): string {
 
 async function createSchema(): Promise<{ schema: string; admin: pg.Pool }> {
   const admin = new pg.Pool({ connectionString: BASE_DATABASE_URL, max: 1 });
-  const schema = `test_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+  // The whole UUID, not a truncated prefix. Truncating to 20 hex chars gave
+  // ~80 bits, which is plenty in theory but collided in practice on a CI runner
+  // running 16 test files in parallel: two files generated the same schema name
+  // and the second died on "duplicate key value violates unique constraint
+  // pg_namespace_nspname_index". Postgres identifiers cap at 63 bytes and
+  // "test_" + 32 hex chars is 37, so there is no reason to shorten it.
+  const schema = `test_${randomUUID().replace(/-/g, '')}`;
   await admin.query(`create schema "${schema}"`);
   return { schema, admin };
 }

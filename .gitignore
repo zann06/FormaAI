@@ -15,8 +15,18 @@ build/
 *.key
 
 # Local data (uploads, generated exports, local DB volumes)
+#
+# `storage/` is anchored to the repository root on purpose. Written as a bare
+# `storage/` pattern it matches at *any* depth, which silently swallowed
+# apps/api/src/services/storage/ — the storage adapter the API imports. Nothing
+# failed locally because those files were still on disk, but a fresh clone could
+# not compile, so CI failed on its first real run.
+#
+# `data/` and `uploads/` stay unanchored because STORAGE_DIR defaults to
+# `./data/storage` *relative to each workspace*, so runtime output shows up at
+# any depth and must never be committed. No source directory is named either.
+/storage/
 data/
-storage/
 uploads/
 
 # Generated sample documents (regenerate with: npm run fixtures)

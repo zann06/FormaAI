@@ -89,12 +89,27 @@ export default {
           '0%, 100%': { transform: 'translateY(0)' },
           '50%': { transform: 'translateY(-6px)' },
         },
+        /**
+         * Drawer entrances. A drawer that pops into place reads as a page reload
+         * rather than as a panel sliding over the workspace, so each side gets a
+         * short 8 px travel in the direction it is anchored to.
+         */
+        'slide-in-left': {
+          '0%': { opacity: '0', transform: 'translateX(-12px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
+        },
+        'slide-in-right': {
+          '0%': { opacity: '0', transform: 'translateX(12px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
+        },
       },
       animation: {
         'fade-up': 'fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both',
         'fade-in': 'fade-in 0.3s ease-out both',
         'scale-in': 'scale-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) both',
         float: 'float 6s ease-in-out infinite',
+        'slide-in-left': 'slide-in-left 0.22s cubic-bezier(0.16, 1, 0.3, 1) both',
+        'slide-in-right': 'slide-in-right 0.22s cubic-bezier(0.16, 1, 0.3, 1) both',
       },
       transitionTimingFunction: {
         // The house easing: quick start, gentle settle.

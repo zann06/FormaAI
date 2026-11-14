@@ -30,13 +30,36 @@
   }
 
   /**
-   * Smooth by default, not on every element indiscriminately: transitions are
-   * limited to colour/shadow/transform so layout never animates (which would
-   * cause the whole page to reflow on hover).
+   * Motion is opt-in per element, NOT applied with a `*` rule.
+   *
+   * A universal `transition-property: ...; transition-duration: 180ms` used to sit
+   * here. It looked harmless and was the main reason the UI felt stiff: every
+   * element in the document — including thousands of table cells, list rows and
+   * chat lines — carried a live transition, so a single hover or scroll frame
+   * scheduled transitions on far more nodes than the one being interacted with.
+   * The result reads as *lag on hover* and *mushy scrolling*, and it fought
+   * `prefers-reduced-motion` because the rule had to be overridden rather than
+   * simply not applying.
+   *
+   * Interactive components now declare the exact properties they animate (see the
+   * `.btn`, `.card-hover`, nav and row rules below), so what moves is what the
+   * user touched.
    */
-  * {
+  html {
+    /* Anchor jumps inside a long report should glide, not teleport. */
+    scroll-behavior: smooth;
+  }
+
+  /* Keyboard focus and pointer targets only; no blanket transitions. */
+  button,
+  a,
+  input,
+  textarea,
+  [role='button'],
+  [role='option'],
+  [role='combobox'] {
     transition-property: color, background-color, border-color, box-shadow, opacity, transform;
-    transition-duration: 180ms;
+    transition-duration: 150ms;
     transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
@@ -58,12 +81,20 @@
 }
 
 @layer components {
+  /**
+   * Buttons: animate only the properties that actually change on hover/press.
+   * `transition-all` used to be here, which forced the browser to watch every
+   * animatable property (including layout ones) on the most-clicked element in
+   * the product — the main source of the "click feels laggy" complaint.
+   */
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
-      transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+      transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-brand
+      disabled:cursor-not-allowed disabled:opacity-50;
   }
+  /* A 1px dip on press, so a click has tactile feedback even when nothing loads. */
   .btn:active:not(:disabled) {
-    @apply scale-[0.985];
+    @apply scale-[0.97];
   }
   .btn-primary {
     @apply btn bg-brand-600 text-white shadow-sm hover:bg-brand-700 hover:shadow-lift active:bg-brand-800;
@@ -102,7 +133,10 @@
     @apply rounded-xl border border-ink-200/80 bg-white shadow-card;
   }
   .card-hover {
-    @apply card transition-all duration-300 hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lift;
+    /* 300ms felt like the card was thinking about it; 180ms with the house
+       easing reads as a direct response while still being soft. */
+    @apply card transition-[transform,box-shadow,border-color] duration-200 ease-brand
+      hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lift;
   }
   .badge {
     @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium;

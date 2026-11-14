@@ -12,6 +12,7 @@ import { ProjectWorkspacePage } from './pages/ProjectWorkspacePage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { UsagePage } from './pages/UsagePage';
 import { AccountPage } from './pages/AccountPage';
+import { AboutPage } from './pages/AboutPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -51,6 +52,7 @@ export function App() {
               <Route path="/settings/providers" element={<ProvidersPage />} />
               <Route path="/settings/usage" element={<UsagePage />} />
               <Route path="/settings/account" element={<AccountPage />} />
+              <Route path="/about" element={<AboutPage />} />
             </Route>
 
             <Route path="*" element={<NotFoundPage />} />

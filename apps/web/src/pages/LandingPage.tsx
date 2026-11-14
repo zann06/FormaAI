@@ -256,6 +256,12 @@ export function LandingPage() {
           <p className="text-xs text-ink-500">
             Open-source, template-driven report generation. Your keys never leave your account.
           </p>
+          <Link
+            to="/about"
+            className="link-underline text-xs font-medium text-ink-600 hover:text-brand-700"
+          >
+            About
+          </Link>
         </div>
       </footer>
     </div>

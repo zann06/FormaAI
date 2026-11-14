@@ -41,6 +41,9 @@ export async function registerPipelineRoutes(instance: FastifyInstance, ctx: Ser
 
     // One pipeline at a time per project: two concurrent runs would fight over
     // the same report sections and produce duplicated AI spend.
+    // tenancy-guard: allow pre-check only — this reads no tenant data (a job id is
+    // discarded). Authorisation happens in jobs.enqueue(user, …) below, which
+    // verifies the project belongs to the caller before anything is queued.
     const [active] = await ctx.db
       .select({ id: processingJobs.id })
       .from(processingJobs)

@@ -10,6 +10,7 @@ const NAV = [
   { to: '/settings/providers', label: 'AI providers', end: false },
   { to: '/settings/usage', label: 'Usage', end: false },
   { to: '/settings/account', label: 'Account', end: false },
+  { to: '/about', label: 'About', end: false },
 ];
 
 /** Circular initials chip shown in the header instead of a bare email address. */

@@ -77,7 +77,7 @@ export function Drawer({
 
   return (
     <div className="fixed inset-0 z-40 flex" data-testid={`drawer-${title.toLowerCase().replace(/\s+/g, '-')}`}>
-      <div className="absolute inset-0 bg-ink-900/30" aria-hidden onClick={onClose} />
+      <div className="absolute inset-0 animate-fade-in bg-ink-900/30" aria-hidden onClick={onClose} />
       <div
         ref={panelRef}
         role="dialog"
@@ -85,7 +85,7 @@ export function Drawer({
         aria-label={title}
         className={`relative z-10 flex h-full flex-col bg-white shadow-xl ${width} ${
           side === 'left' ? 'mr-auto border-r' : 'ml-auto border-l'
-        } border-ink-200`}
+        } border-ink-200 ${side === 'left' ? 'animate-slide-in-left' : 'animate-slide-in-right'}`}
       >
         <div className="flex items-start justify-between gap-3 border-b border-ink-200 px-4 py-3">
           <div className="min-w-0">
@@ -102,7 +102,7 @@ export function Drawer({
             ✕
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto">{children}</div>
+        <div className="min-h-0 flex-1 overflow-auto scroll-slim">{children}</div>
         {footer && <div className="border-t border-ink-200 px-4 py-3">{footer}</div>}
       </div>
     </div>

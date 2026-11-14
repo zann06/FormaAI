@@ -219,7 +219,7 @@ export function PreviewPane({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto bg-ink-100 p-3" data-testid="preview-scroll">
+      <div className="flex-1 overflow-auto bg-ink-100 p-3 scroll-slim" data-testid="preview-scroll">
         {draftState && draftState.total > 0 && draftState.drafted === 0 && (
           <div
             className="mx-auto mb-3 max-w-md rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"

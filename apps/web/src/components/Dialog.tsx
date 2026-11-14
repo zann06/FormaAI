@@ -71,13 +71,14 @@ export function Dialog({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink-900/40" aria-hidden onClick={onClose} />
+      {/* The backdrop fades while the panel rises, so opening reads as one motion. */}
+      <div className="absolute inset-0 animate-fade-in bg-ink-900/40" aria-hidden onClick={onClose} />
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="relative z-10 w-full max-w-lg rounded-xl border border-ink-200 bg-white p-6 shadow-xl"
+        className="relative z-10 w-full max-w-lg animate-scale-in rounded-xl border border-ink-200 bg-white p-6 shadow-xl"
       >
         <h2 className="text-lg font-semibold text-ink-900">{title}</h2>
         {description && <p className="mt-1 text-sm text-ink-600">{description}</p>}

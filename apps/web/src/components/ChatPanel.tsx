@@ -232,9 +232,36 @@ export function ChatPanel({
     );
   }, [messages, projectId]);
 
+  /**
+   * Auto-scroll to the newest message, but only when the user is already near
+   * the bottom.
+   *
+   * The previous version assigned `scrollTop = scrollHeight` on every render,
+   * which teleported the list and — worse — yanked the view back down while
+   * someone was reading an earlier reply. It now measures the distance from the
+   * bottom *before* the new message lands and only glides when that distance is
+   * small, so scrolling up to re-read something is respected.
+   */
+  const stickToBottom = useRef(true);
+
   useEffect(() => {
     const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!node) return;
+    const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    stickToBottom.current = distance < 80;
+  }, [messages]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !stickToBottom.current) return;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    // `scrollTo` with options is not universal (older Safari, and jsdom in tests),
+    // so fall back to the plain assignment those environments do understand.
+    if (typeof node.scrollTo === 'function') {
+      node.scrollTo({ top: node.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
+    } else {
+      node.scrollTop = node.scrollHeight;
+    }
   }, [messages]);
 
   const selectedProvider = useMemo(
@@ -337,7 +364,11 @@ export function ChatPanel({
       }
 
       if (/\b(cover|sampul|nama|nim|kelas)\b/.test(lower)) {
-        return 'The cover is filled at export from what you tell me here. Say something like "Nama: Farid, NIM: 124140210, Kelas: RA" and I will store it so the exported cover carries it.';
+        return 'The cover is filled at export from what you tell me here. Say something like "Nama: Farid, NIM: 124140210, Kelas: RA" and I will store it so the exported cover carries it. The submission date fills itself with the day you export — tell me a date explicitly only if you want a different one.';
+      }
+
+      if (/\b(tanggal|date|deadline|tenggat|batas)\b/.test(lower)) {
+        return 'The submission date is written automatically as the day you export, and follows the new day if you export again later. Tell me a date explicitly — "tanggal pengumpulan 20 November 2026" — if you want a fixed one. A deadline ("batas pengumpulan") is a date only you know; I will ask rather than guess.';
       }
 
       if (/\b(export|download|unduh|docx|pdf)\b/.test(lower)) {
@@ -776,7 +807,7 @@ export function ChatPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4" ref={scrollRef} data-testid="chat-messages">
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 scroll-slim" ref={scrollRef} data-testid="chat-messages">
         {messages.length === 0 && (
           <div className="mx-auto mt-6 max-w-md space-y-3 text-sm text-ink-600">
             <p className="font-medium text-ink-900">What are we writing today?</p>

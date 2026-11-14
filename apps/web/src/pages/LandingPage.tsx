@@ -128,12 +128,12 @@ export function LandingPage() {
             </p>
 
             <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
-              <Link to={primaryTo} className="btn-accent rounded-full px-7 py-3 text-[15px]">
+              <Link to={primaryTo} className="btn-accent rounded-full px-7 py-3 text-[15px] shadow-accent-glow">
                 {primaryLabel}
               </Link>
               <a
                 href="#how-it-works"
-                className="btn rounded-full border border-white/35 bg-white/10 px-7 py-3 text-[15px] text-white backdrop-blur hover:border-white/60 hover:bg-white/20"
+                className="btn rounded-full border border-white/35 bg-white/10 px-7 py-3 text-[15px] text-white shadow-[0_10px_30px_-14px_rgba(5,26,74,0.9)] backdrop-blur hover:border-white/60 hover:bg-white/20"
               >
                 See how it works
               </a>
@@ -144,6 +144,15 @@ export function LandingPage() {
             </p>
           </div>
         </div>
+
+        {/*
+          The hero used to end on a hard horizontal line — deep blue meeting white in
+          one pixel row — which read as the page being cut in half. This overlay fades
+          the same deep blue into the page colour across the last stretch of the
+          section, so the hero dissolves into the content below instead of stopping.
+          Pointer-events-none keeps it from swallowing clicks on the copy above it.
+        */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-48 bg-brand-fade-out sm:h-56" />
       </section>
 
       {/* -------------------------------------------------------------- steps */}
@@ -224,28 +233,42 @@ export function LandingPage() {
       </section>
 
       {/* --------------------------------------------------------------- cta */}
-      <section id="privacy" className="relative overflow-hidden bg-brand-hero">
-        <ParticleField />
-        <div className="relative mx-auto max-w-3xl px-4 py-20 text-center sm:px-6">
-          <LogoMark size={44} className="mx-auto mb-6 animate-float" />
-          <h2 className="text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            Start from the template you already have
-          </h2>
-          <p className="mx-auto mt-4 max-w-xl text-pretty text-white/80">
-            No migration, no new format, no retyping. Upload the .docx, add your sources, and review the draft.
-          </p>
-          <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
-            <Link to={primaryTo} className="btn-accent rounded-full px-7 py-3 text-[15px]">
-              {primaryLabel}
-            </Link>
-            {!user && (
-              <Link
-                to="/signin"
-                className="btn rounded-full border border-white/35 bg-white/10 px-7 py-3 text-[15px] text-white hover:border-white/60 hover:bg-white/20"
-              >
-                Sign in
+      {/*
+        This band used to run edge to edge and stop on two straight lines, top and
+        bottom, against the white page — the same hard-cut problem as the hero but in
+        both directions. It is now a rounded panel inset from the page edges, lifted
+        by a blue halo, with the particle field masked into a wing shape so no dotted
+        rectangle is visible. The white gutter above and below lets the shadow read.
+      */}
+      <section id="privacy" className="relative px-4 pb-16 pt-4 sm:px-6">
+        <div className="relative mx-auto max-w-6xl overflow-hidden rounded-[28px] bg-brand-band shadow-band">
+          <ParticleField />
+          <div aria-hidden className="pointer-events-none absolute inset-0 bg-brand-glow opacity-70" />
+          {/* Softens the panel's own top and bottom so the block does not read as a sticker. */}
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-16 bg-brand-fade-in opacity-30" />
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-brand-fade-out opacity-30" />
+
+          <div className="relative mx-auto max-w-3xl px-6 py-20 text-center">
+            <LogoMark size={44} className="mx-auto mb-6 animate-float drop-shadow-[0_10px_24px_rgba(253,145,204,0.45)]" />
+            <h2 className="text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+              Start from the template you already have
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-pretty text-white/80">
+              No migration, no new format, no retyping. Upload the .docx, add your sources, and review the draft.
+            </p>
+            <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
+              <Link to={primaryTo} className="btn-accent rounded-full px-7 py-3 text-[15px] shadow-accent-glow">
+                {primaryLabel}
               </Link>
-            )}
+              {!user && (
+                <Link
+                  to="/signin"
+                  className="btn rounded-full border border-white/35 bg-white/10 px-7 py-3 text-[15px] text-white shadow-[0_10px_30px_-14px_rgba(5,26,74,0.9)] hover:border-white/60 hover:bg-white/20"
+                >
+                  Sign in
+                </Link>
+              )}
+            </div>
           </div>
         </div>
       </section>

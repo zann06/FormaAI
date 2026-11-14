@@ -62,12 +62,38 @@ export default {
         'brand-hero': 'radial-gradient(120% 90% at 50% 0%, #1a52c9 0%, #09318d 45%, #051a4a 100%)',
         'brand-glow': 'radial-gradient(60% 60% at 50% 40%, rgba(253,145,204,0.35) 0%, rgba(253,145,204,0) 70%)',
         'brand-line': 'linear-gradient(90deg, #09318d 0%, #fd91cc 100%)',
+        /**
+         * The band the hero dissolves into.
+         *
+         * The hero used to stop dead on `#051a4a` and meet the white page in a
+         * straight line, which read as a hard edge cutting across the screen. This
+         * fades the same deep blue down into white over the last stretch of the
+         * section, so the hero bleeds out instead of ending.
+         */
+        'brand-fade-out': 'linear-gradient(to bottom, rgba(5,26,74,0) 0%, rgba(5,26,74,0.35) 22%, rgba(5,26,74,0.82) 52%, #ffffff 100%)',
+        /** The mirror of the above, for the top edge of the closing band. */
+        'brand-fade-in': 'linear-gradient(to bottom, #ffffff 0%, rgba(5,26,74,0.82) 48%, rgba(5,26,74,0.35) 78%, rgba(5,26,74,0) 100%)',
+        /**
+         * The CTA band, rounded and lifted off the page instead of butting into it.
+         * A soft blue halo sits underneath so the block reads as a panel floating on
+         * the page rather than a painted stripe.
+         */
+        'brand-band': 'radial-gradient(120% 140% at 50% 0%, #1a52c9 0%, #09318d 52%, #061f56 100%)',
       },
       boxShadow: {
         // A soft, blue-tinted lift so cards never look flat grey.
         card: '0 1px 2px rgba(9,49,141,0.06), 0 8px 24px -12px rgba(9,49,141,0.18)',
         lift: '0 2px 4px rgba(9,49,141,0.08), 0 18px 40px -18px rgba(9,49,141,0.28)',
         accent: '0 8px 24px -10px rgba(253,145,204,0.75)',
+        /**
+         * A deep blue halo for the closing band, so the panel floats above the page
+         * instead of sitting flush against it. Two stacked shadows: a tight contact
+         * shadow and a wide ambient one, which is what makes it read as height
+         * rather than as a blurry border.
+         */
+        band: '0 1px 2px rgba(6,31,86,0.10), 0 24px 60px -24px rgba(9,49,141,0.45), 0 8px 22px -12px rgba(9,49,141,0.28)',
+        /** Glow behind the accent button, used where it sits on dark blue. */
+        'accent-glow': '0 10px 30px -8px rgba(253,145,204,0.65), 0 2px 10px -2px rgba(253,145,204,0.45)',
       },
       keyframes: {
         'fade-up': {

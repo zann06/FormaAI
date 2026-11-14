@@ -24,7 +24,13 @@ export interface JobLike {
 export function useJobPolling(projectId: string | undefined, onJobs: (jobs: JobLike[]) => void, enabled: boolean) {
   const [active, setActive] = useState(false);
   const timer = useRef<number | null>(null);
-  const stopped = useRef(false);
+  // A monotonically increasing run id, not a boolean. A boolean was reset to
+  // false by the *next* mount, so a request issued by a previous mount that
+  // resolved late would see `stopped === false`, deliver its stale job list to
+  // the new component and schedule another timer. In tests that leaked a second
+  // assistant reply into the following test's DOM; in the app it could apply one
+  // project's job state to another after a fast project switch.
+  const runId = useRef(0);
   const onJobsRef = useRef(onJobs);
   onJobsRef.current = onJobs;
 
@@ -35,29 +41,35 @@ export function useJobPolling(projectId: string | undefined, onJobs: (jobs: JobL
     }
   }, []);
 
-  const tick = useCallback(async () => {
-    if (!projectId || stopped.current) return;
-    try {
-      const { jobs } = await api.get<{ jobs: JobLike[] }>(`/api/projects/${projectId}/jobs`);
-      if (stopped.current) return;
-      onJobsRef.current(jobs);
-      const busy = jobs.some((job) => job.status === 'queued' || job.status === 'running');
-      setActive(busy);
-      // Poll quickly while busy, slowly when idle (to catch jobs started in
-      // another tab), and never spin.
-      timer.current = window.setTimeout(() => void tick(), busy ? 1200 : 5000);
-    } catch {
-      // Transient polling failure: try again shortly without surfacing noise.
-      timer.current = window.setTimeout(() => void tick(), 3000);
-    }
-  }, [projectId]);
+  const tick = useCallback(
+    async (forRun: number) => {
+      if (!projectId || runId.current !== forRun) return;
+      try {
+        const { jobs } = await api.get<{ jobs: JobLike[] }>(`/api/projects/${projectId}/jobs`);
+        if (runId.current !== forRun) return;
+        onJobsRef.current(jobs);
+        const busy = jobs.some((job) => job.status === 'queued' || job.status === 'running');
+        setActive(busy);
+        // Poll quickly while busy, slowly when idle (to catch jobs started in
+        // another tab), and never spin.
+        timer.current = window.setTimeout(() => void tick(forRun), busy ? 1200 : 5000);
+      } catch {
+        if (runId.current !== forRun) return;
+        // Transient polling failure: try again shortly without surfacing noise.
+        timer.current = window.setTimeout(() => void tick(forRun), 3000);
+      }
+    },
+    [projectId],
+  );
 
   useEffect(() => {
-    stopped.current = false;
     if (!enabled || !projectId) return;
-    void tick();
+    runId.current += 1;
+    const myRun = runId.current;
+    void tick(myRun);
     return () => {
-      stopped.current = true;
+      // Invalidate this run so any in-flight response is ignored, and stop the timer.
+      if (runId.current === myRun) runId.current += 1;
       clear();
     };
   }, [enabled, projectId, tick, clear]);
@@ -65,7 +77,7 @@ export function useJobPolling(projectId: string | undefined, onJobs: (jobs: JobL
   /** Immediately re-polls (used after the user starts a job). */
   const refresh = useCallback(() => {
     clear();
-    void tick();
+    void tick(runId.current);
   }, [clear, tick]);
 
   return { active, refresh };

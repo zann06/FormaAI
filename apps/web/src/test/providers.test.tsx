@@ -7,6 +7,17 @@ import { ToastProvider } from '../lib/toast';
 import { ProvidersPage } from '../pages/ProvidersPage';
 import { installFetchMock } from '../test/fetchMock';
 
+/**
+ * Zero-delay typing and clicking.
+ *
+ * The default `userEvent` instance waits between keystrokes. On a loaded CI
+ * runner those waits can push a single test past its 30 s budget, and a test
+ * aborted mid-`type` never runs its teardown — its tree stays mounted and the
+ * next test then sees two copies of the page. `delay: null` is user-event's
+ * documented way to skip the artificial wait without changing behaviour.
+ */
+const user = userEvent.setup({ delay: null });
+
 function renderProviders() {
   return render(
     <SessionProvider>
@@ -55,11 +66,11 @@ describe('ProvidersPage', () => {
     renderProviders();
     await screen.findByText('No AI provider configured');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add your first provider' }));
-    await userEvent.type(screen.getByLabelText('Name'), 'OpenAI');
-    await userEvent.type(screen.getByLabelText('Model'), 'gpt-4o-mini');
-    await userEvent.type(screen.getByLabelText('API key'), 'sk-super-secret-key');
-    await userEvent.click(screen.getByRole('button', { name: 'Save provider' }));
+    await user.click(screen.getByRole('button', { name: 'Add your first provider' }));
+    await user.type(screen.getByLabelText('Name'), 'OpenAI');
+    await user.type(screen.getByLabelText('Model'), 'gpt-4o-mini');
+    await user.type(screen.getByLabelText('API key'), 'sk-super-secret-key');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
 
     await waitFor(() => {
       const create = calls.find((call) => call.method === 'POST' && call.path === '/api/provider-credentials');
@@ -88,10 +99,10 @@ describe('ProvidersPage', () => {
 
     renderProviders();
     await screen.findByText('No AI provider configured');
-    await userEvent.click(screen.getByRole('button', { name: 'Add your first provider' }));
-    await userEvent.type(screen.getByLabelText('Name'), 'X');
-    await userEvent.type(screen.getByLabelText('Model'), 'm');
-    await userEvent.click(screen.getByRole('button', { name: 'Save provider' }));
+    await user.click(screen.getByRole('button', { name: 'Add your first provider' }));
+    await user.type(screen.getByLabelText('Name'), 'X');
+    await user.type(screen.getByLabelText('Model'), 'm');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Enter your API key');
     expect(calls.some((call) => call.method === 'POST' && call.path === '/api/provider-credentials')).toBe(false);
@@ -121,14 +132,14 @@ describe('ProvidersPage', () => {
 
     renderProviders();
     await screen.findByText('OpenAI');
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await userEvent.click(await screen.findByRole('button', { name: /Load models from server/i }));
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.click(await screen.findByRole('button', { name: /Load models from server/i }));
 
     // The picker is now the branded combobox, not the browser's native <select>,
     // so its options live in a listbox that is only mounted while it is open.
     const picker = (await screen.findByLabelText('Model')) as HTMLButtonElement;
     await waitFor(() => expect(picker.getAttribute('role')).toBe('combobox'));
-    await userEvent.click(picker);
+    await user.click(picker);
 
     // The catalogue comes from the server, and the still-configured model stays
     // selectable even though this provider no longer lists it â€” otherwise saving
@@ -148,7 +159,7 @@ describe('ProvidersPage', () => {
     ]);
     // The current model is still the selected one.
     expect(picker.textContent).toContain('gpt-4o-mini');
-    await userEvent.keyboard('{Escape}');
+    await user.keyboard('{Escape}');
     // Escape closed the list, not the whole dialog: the form and its warning are
     // still on screen. (Before the fix one Escape closed both and lost the form.)
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
@@ -181,8 +192,8 @@ describe('ProvidersPage', () => {
 
     renderProviders();
     await screen.findByText('OpenAI');
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await userEvent.click(await screen.findByRole('button', { name: /Load models from server/i }));
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.click(await screen.findByRole('button', { name: /Load models from server/i }));
 
     const picker = (await screen.findByLabelText('Model')) as HTMLButtonElement;
     await waitFor(() => expect(picker.getAttribute('role')).toBe('combobox'));
@@ -191,10 +202,10 @@ describe('ProvidersPage', () => {
     // contract. Arrow presses are counted from the real list so the test does not
     // depend on how many models the mock happens to return.
     picker.focus();
-    await userEvent.keyboard('{ArrowDown}');
+    await user.keyboard('{ArrowDown}');
     const count = (await screen.findAllByRole('option')).length;
-    for (let index = 1; index < count; index += 1) await userEvent.keyboard('{ArrowDown}');
-    await userEvent.keyboard('{Enter}');
+    for (let index = 1; index < count; index += 1) await user.keyboard('{ArrowDown}');
+    await user.keyboard('{Enter}');
     await waitFor(() => expect(picker.textContent).toContain('cbai/glm-5.0'));
     // The list is closed after choosing, as a native select does.
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
@@ -219,8 +230,8 @@ describe('ProvidersPage', () => {
 
     renderProviders();
     await screen.findByText('OpenAI');
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await userEvent.click(await screen.findByRole('button', { name: /Load models from server/i }));
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await user.click(await screen.findByRole('button', { name: /Load models from server/i }));
 
     // The field stays a free-text input and explains why, instead of erroring out.
     const field = (await screen.findByLabelText('Model')) as HTMLInputElement;

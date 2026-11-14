@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,6 +6,17 @@ import { SessionProvider } from '../lib/session';
 import { ToastProvider } from '../lib/toast';
 import { SignInPage, SignUpPage } from '../pages/AuthPages';
 import { installFetchMock } from '../test/fetchMock';
+
+/**
+ * Zero-delay typing and clicking.
+ *
+ * The default `userEvent` instance waits between keystrokes. On a loaded CI
+ * runner those waits can push a single test past its 30 s budget, and a test
+ * aborted mid-`type` never runs its teardown â€” its tree stays mounted and the
+ * next test then sees two copies of the page. `delay: null` is user-event's
+ * documented way to skip the artificial wait without changing behaviour.
+ */
+const user = userEvent.setup({ delay: null });
 
 function renderAuth(ui: React.ReactElement) {
   return render(
@@ -37,9 +48,9 @@ describe('SignInPage', () => {
     renderAuth(<SignInPage />);
     await screen.findByRole('heading', { name: 'Sign in' });
 
-    await userEvent.type(screen.getByLabelText('Email'), 'a@b.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'secret-password');
-    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await user.type(screen.getByLabelText('Email'), 'a@b.test');
+    await user.type(screen.getByLabelText('Password'), 'secret-password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     await waitFor(() => {
       const signIn = calls.find((call) => call.method === 'POST' && call.path === '/api/auth/signin');
@@ -59,9 +70,9 @@ describe('SignInPage', () => {
 
     renderAuth(<SignInPage />);
     await screen.findByRole('heading', { name: 'Sign in' });
-    await userEvent.type(screen.getByLabelText('Email'), 'a@b.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'wrong-password');
-    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await user.type(screen.getByLabelText('Email'), 'a@b.test');
+    await user.type(screen.getByLabelText('Password'), 'wrong-password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Email or password is incorrect.');
   });
@@ -73,9 +84,9 @@ describe('SignUpPage', () => {
 
     renderAuth(<SignUpPage />);
     await screen.findByRole('heading', { name: 'Create your account' });
-    await userEvent.type(screen.getByLabelText('Email'), 'new@b.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'short');
-    await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
+    await user.type(screen.getByLabelText('Email'), 'new@b.test');
+    await user.type(screen.getByLabelText('Password'), 'short');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('at least 10 characters');
     // The API must never be called with an invalid password.

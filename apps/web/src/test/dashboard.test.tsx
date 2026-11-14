@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,6 +6,17 @@ import { SessionProvider } from '../lib/session';
 import { ToastProvider } from '../lib/toast';
 import { DashboardPage } from '../pages/DashboardPage';
 import { installFetchMock } from '../test/fetchMock';
+
+/**
+ * Zero-delay typing and clicking.
+ *
+ * The default `userEvent` instance waits between keystrokes. On a loaded CI
+ * runner those waits can push a single test past its 30 s budget, and a test
+ * aborted mid-`type` never runs its teardown â€” its tree stays mounted and the
+ * next test then sees two copies of the page. `delay: null` is user-event's
+ * documented way to skip the artificial wait without changing behaviour.
+ */
+const user = userEvent.setup({ delay: null });
 
 /**
  * Archive and Delete are different promises: archive is reversible, delete is
@@ -64,19 +75,19 @@ describe('DashboardPage archive and delete', () => {
     renderDashboard();
     await screen.findByText('Test 6');
 
-    await userEvent.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /Archive project/i }));
+    await user.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Archive project/i }));
 
     // A confirmation explains that nothing is lost before anything is sent.
     expect(await screen.findByText(/can restore it any time/i)).toBeInTheDocument();
     expect(calls.some((call) => call.method === 'POST' && call.path.endsWith('/archive'))).toBe(false);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Archive' }));
+    await user.click(screen.getByRole('button', { name: 'Archive' }));
 
     await waitFor(() => {
       expect(calls.some((call) => call.method === 'POST' && call.path === '/api/projects/p1/archive')).toBe(true);
     });
-    // Archiving must never call DELETE — that is the whole point of having both.
+    // Archiving must never call DELETE â€” that is the whole point of having both.
     expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
   });
 
@@ -90,15 +101,15 @@ describe('DashboardPage archive and delete', () => {
     renderDashboard();
     await screen.findByText('Test 6');
 
-    await userEvent.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /Delete permanently/i }));
+    await user.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete permanently/i }));
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(/cannot be undone/i)).toBeInTheDocument();
     expect(within(dialog).getByText(/source documents/i)).toBeInTheDocument();
     expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
 
-    await userEvent.click(within(dialog).getByRole('button', { name: /Delete permanently/i }));
+    await user.click(within(dialog).getByRole('button', { name: /Delete permanently/i }));
 
     await waitFor(() => {
       expect(calls.some((call) => call.method === 'DELETE' && call.path === '/api/projects/p1')).toBe(true);
@@ -114,10 +125,10 @@ describe('DashboardPage archive and delete', () => {
     renderDashboard();
     await screen.findByText('Test 6');
 
-    await userEvent.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /Delete permanently/i }));
+    await user.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete permanently/i }));
     const dialog = await screen.findByRole('dialog');
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
@@ -136,12 +147,12 @@ describe('DashboardPage archive and delete', () => {
     await screen.findByText('Test 6');
 
     // The inline Restore button is visible without opening the menu.
-    await userEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await user.click(screen.getByRole('button', { name: 'Restore' }));
     await waitFor(() => {
       expect(calls.some((call) => call.method === 'POST' && call.path === '/api/projects/p1/restore')).toBe(true);
     });
 
-    await userEvent.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
+    await user.click(screen.getByRole('button', { name: /Actions for Test 6/i }));
     expect(screen.queryByRole('menuitem', { name: /Archive project/i })).not.toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /Delete permanently/i })).toBeInTheDocument();
   });

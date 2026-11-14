@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -6,6 +6,21 @@ import { SessionProvider } from '../lib/session';
 import { ToastProvider } from '../lib/toast';
 import { ProjectWorkspacePage } from '../pages/ProjectWorkspacePage';
 import { installFetchMock } from '../test/fetchMock';
+
+/**
+ * Zero-delay typing.
+ *
+ * The default `userEvent.type` waits between keystrokes. This file types several
+ * long sentences per test, and on a loaded CI runner those waits pushed a single
+ * test past its 30 s budget. A test aborted mid-`type` never runs its teardown, so
+ * its committed tree stayed mounted and the *next* test found two chat transcripts
+ * (`Found multiple elements by: [data-testid="chat-steps"]`) â€” eleven cascading
+ * failures that never reproduced locally.
+ *
+ * Removing the artificial delay keeps the same behavioural coverage without the
+ * wall-clock cost. `delay: null` is user-event's documented way to do this.
+ */
+const user = userEvent.setup({ delay: null });
 
 const projectId = '11111111-1111-4111-8111-111111111111';
 const sectionId = '22222222-2222-4222-8222-222222222222';
@@ -189,20 +204,20 @@ describe('ProjectWorkspacePage', () => {
     expect(screen.getByLabelText('Chat')).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
 
-    // Sources and outline are not in the grid any more — they are opened on demand.
+    // Sources and outline are not in the grid any more â€” they are opened on demand.
     expect(screen.queryByText('template.docx')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open section Introduction' })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByTestId('chat-open-sources'));
+    await user.click(screen.getByTestId('chat-open-sources'));
     expect(await screen.findByText('template.docx')).toBeInTheDocument();
     expect(screen.getByText('notes.txt')).toBeInTheDocument();
-    await userEvent.click(screen.getByTestId('drawer-close'));
+    await user.click(screen.getByTestId('drawer-close'));
 
-    await userEvent.click(screen.getByTestId('chat-open-outline'));
+    await user.click(screen.getByTestId('chat-open-outline'));
     // Outline entry exists (the row button, not its remove control).
     expect(await screen.findByRole('button', { name: 'Open section Introduction' })).toBeInTheDocument();
     // Selecting a section opens its editor inside the same drawer.
-    await userEvent.click(screen.getByRole('button', { name: 'Open section Introduction' }));
+    await user.click(screen.getByRole('button', { name: 'Open section Introduction' }));
     const editor = (await screen.findByLabelText('Section content')) as HTMLTextAreaElement;
     await waitFor(() => expect(editor.value).toBe('The quarter was productive.'));
     // Mapping coverage is surfaced.
@@ -220,17 +235,17 @@ describe('ProjectWorkspacePage', () => {
     renderWorkspace();
 
     await screen.findByRole('heading', { name: 'Q3 Report' });
-    await userEvent.click(screen.getByTestId('chat-open-outline'));
-    await userEvent.click(await screen.findByRole('button', { name: 'Open section Introduction' }));
+    await user.click(screen.getByTestId('chat-open-outline'));
+    await user.click(await screen.findByRole('button', { name: 'Open section Introduction' }));
 
     const editor = (await screen.findByLabelText('Section content')) as HTMLTextAreaElement;
     await waitFor(() => expect(editor.value).toBe('The quarter was productive.'));
 
-    await userEvent.clear(editor);
-    await userEvent.type(editor, 'Edited body.');
+    await user.clear(editor);
+    await user.type(editor, 'Edited body.');
     // The explicit Save button triggers the request immediately.
     const editorPane = screen.getByLabelText('Section editor');
-    await userEvent.click(within(editorPane).getByRole('button', { name: 'Save' }));
+    await user.click(within(editorPane).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       const patch = calls.find(
@@ -245,7 +260,7 @@ describe('ProjectWorkspacePage', () => {
     renderWorkspace();
     await screen.findByRole('heading', { name: 'Q3 Report' });
 
-    await userEvent.click(screen.getByRole('tab', { name: 'Export' }));
+    await user.click(screen.getByRole('tab', { name: 'Export' }));
     const pdfButton = await screen.findByRole('button', { name: 'Export PDF' });
     await waitFor(() => expect(pdfButton).toBeDisabled());
     // DOCX export remains available because content exists.
@@ -329,7 +344,7 @@ describe('ProjectWorkspacePage', () => {
     await screen.findByRole('heading', { name: 'Q3 Report' });
 
     const start = await screen.findByTestId('scan-start');
-    await userEvent.click(start);
+    await user.click(start);
 
     await waitFor(() => {
       const post = calls.find(
@@ -468,7 +483,7 @@ describe('ProjectWorkspacePage', () => {
 
   /**
    * The Preview tab shows the real exported pages. It must render the page images,
-   * explain truncation, and — when the server has no renderer — say so without
+   * explain truncation, and â€” when the server has no renderer â€” say so without
    * implying the report itself is broken.
    */
   describe('preview tab', () => {
@@ -496,7 +511,7 @@ describe('ProjectWorkspacePage', () => {
       renderWorkspace();
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
-      await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+      await user.click(screen.getByRole('tab', { name: 'Preview' }));
 
       const pane = await screen.findByTestId('preview-pane');
       expect(within(pane).getByText(/Showing 2 of 2 pages/i)).toBeInTheDocument();
@@ -508,7 +523,7 @@ describe('ProjectWorkspacePage', () => {
     /**
      * The preview used to update only on Refresh, so it was routine to fix a
      * section and still be shown the old page. It now re-renders by itself after a
-     * short debounce — this pins that, including the part that matters most: an
+     * short debounce â€” this pins that, including the part that matters most: an
      * edit that keeps the same character count must still refresh.
      */
     it('re-renders automatically after an edit, even one that keeps the same length', async () => {
@@ -546,7 +561,7 @@ describe('ProjectWorkspacePage', () => {
       );
       renderWorkspace();
       await screen.findByRole('heading', { name: 'Q3 Report' });
-      await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+      await user.click(screen.getByRole('tab', { name: 'Preview' }));
       await screen.findByAltText(/Page 1 of the exported report/i);
 
       const initial = previewCalls;
@@ -556,15 +571,15 @@ describe('ProjectWorkspacePage', () => {
       // The section editor lives in the Outline drawer, so open it first; a test
       // that silently returns when the editor is missing proves nothing, so every
       // step here is asserted.
-      await userEvent.click(screen.getByTestId('chat-open-outline'));
-      await userEvent.click(await screen.findByRole('button', { name: 'Open section Introduction' }));
+      await user.click(screen.getByTestId('chat-open-outline'));
+      await user.click(await screen.findByRole('button', { name: 'Open section Introduction' }));
       const editor = (await screen.findByLabelText('Section content')) as HTMLTextAreaElement;
       await waitFor(() => expect(editor.value).toBe('The quarter was productive.'));
 
-      await userEvent.clear(editor);
-      await userEvent.type(editor, 'The quarter was productivf.');
+      await user.clear(editor);
+      await user.type(editor, 'The quarter was productivf.');
       const editorPane = screen.getByLabelText('Section editor');
-      await userEvent.click(within(editorPane).getByRole('button', { name: 'Save' }));
+      await user.click(within(editorPane).getByRole('button', { name: 'Save' }));
 
       // The debounce is 1200 ms; allow for the save round trip on top.
       await waitFor(() => expect(previewCalls).toBeGreaterThan(initial), { timeout: 8000 });
@@ -586,7 +601,7 @@ describe('ProjectWorkspacePage', () => {
       );
       renderWorkspace();
       await screen.findByRole('heading', { name: 'Q3 Report' });
-      await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+      await user.click(screen.getByRole('tab', { name: 'Preview' }));
 
       const note = await screen.findByTestId('preview-truncated');
       expect(note).toHaveTextContent(/Only the first 1 pages/i);
@@ -609,7 +624,7 @@ describe('ProjectWorkspacePage', () => {
       );
       renderWorkspace();
       await screen.findByRole('heading', { name: 'Q3 Report' });
-      await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+      await user.click(screen.getByRole('tab', { name: 'Preview' }));
 
       const error = await screen.findByTestId('preview-error');
       expect(error).toHaveTextContent(/not available on this server/i);
@@ -669,7 +684,7 @@ describe('ProjectWorkspacePage', () => {
     renderWorkspace();
     await screen.findByRole('heading', { name: 'Q3 Report' });
 
-    await userEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+    await user.click(screen.getByRole('tab', { name: 'Preview' }));
 
     const banner = await screen.findByTestId('preview-not-generated');
     expect(banner).toHaveTextContent(/has not been written yet/i);
@@ -731,8 +746,8 @@ describe('ProjectWorkspacePage', () => {
 
       const chat = await screen.findByTestId('chat-panel');
       const input = within(chat).getByTestId('chat-input');
-      await userEvent.type(input, 'Tolong perkuat bagian analisis routing');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(input, 'Tolong perkuat bagian analisis routing');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       // The user's message is kept in the transcript.
       const userMessage = await within(chat).findByTestId('chat-message-user');
@@ -768,12 +783,12 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'what is the status?');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'what is the status?');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
       // A question is ANSWERED from the project's real state, so the trail carries the
-      // facts behind the answer rather than "understood as …" for a command.
+      // facts behind the answer rather than "understood as â€¦" for a command.
       // It reports the real state of this project: 1 section, 1 written.
       expect(steps).toHaveTextContent(/Template read: 1 section/i);
       expect(steps).toHaveTextContent(/1 of 1 sections have content/i);
@@ -795,8 +810,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'which part is still empty?');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'which part is still empty?');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
       expect(steps).toHaveTextContent(/Still empty: Introduction/i);
@@ -812,8 +827,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'generate the report');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'generate the report');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
       expect(steps).toHaveTextContent(/Blocked: no template/i);
@@ -849,8 +864,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'generate the report');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'generate the report');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       // The action really reached the API, with the selected provider attached.
       await waitFor(() => {
@@ -880,8 +895,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'generate the report');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'generate the report');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
       await waitFor(() => expect(steps).toHaveTextContent(/Provider rejected the key/i), { timeout: 6000 });
@@ -902,8 +917,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'export the docx');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'export the docx');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       await waitFor(() => {
         const post = calls.find((call) => call.method === 'POST' && call.path === `/api/projects/${projectId}/exports`);
@@ -940,8 +955,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'export the docx');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'export the docx');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const answer = await within(chat).findByTestId('chat-answer', {}, { timeout: 8000 });
       await waitFor(() => expect(answer).toHaveTextContent(/still blank on the cover/i), { timeout: 8000 });
@@ -962,11 +977,11 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(
+      await user.type(
         within(chat).getByTestId('chat-input'),
         'Nama: Farid Rizky Fauzan, NIM: 124140210, Kelas: RA',
       );
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.click(within(chat).getByTestId('chat-send'));
 
       await waitFor(() => {
         const patch = calls.find((call) => call.method === 'PATCH' && call.path === `/api/projects/${projectId}`);
@@ -991,8 +1006,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'export as pdf');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'export as pdf');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       const steps = await within(chat).findByTestId('chat-steps');
       // The reason names the section, which is what the user needs to act on.
@@ -1005,8 +1020,8 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(within(chat).getByTestId('chat-input'), 'use a more formal academic tone');
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.type(within(chat).getByTestId('chat-input'), 'use a more formal academic tone');
+      await user.click(within(chat).getByTestId('chat-send'));
 
       await waitFor(() => {
         const patch = calls.find((call) => call.method === 'PATCH' && call.path === `/api/projects/${projectId}`);
@@ -1021,17 +1036,17 @@ describe('ProjectWorkspacePage', () => {
       renderWorkspace();
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
-      await userEvent.click(screen.getByTestId('chat-open-sources'));
+      await user.click(screen.getByTestId('chat-open-sources'));
       expect(await screen.findByText('notes.txt')).toBeInTheDocument();
       // Escape closes it, like any dialog.
-      await userEvent.keyboard('{Escape}');
+      await user.keyboard('{Escape}');
       await waitFor(() => expect(screen.queryByText('notes.txt')).not.toBeInTheDocument());
     });
 
     /**
      * The reported bug, end to end: the user sent
      *   "buatkan laporan dari template ... dan dokumentasi/source bisa dari sumber zip ..."
-     * and nothing at all came back. The reply bubble must always resolve — a silent
+     * and nothing at all came back. The reply bubble must always resolve â€” a silent
      * chat is indistinguishable from a crash.
      */
     it('answers a report request that cannot run instead of staying silent', async () => {
@@ -1046,11 +1061,11 @@ describe('ProjectWorkspacePage', () => {
       await screen.findByRole('heading', { name: 'Q3 Report' });
 
       const chat = await screen.findByTestId('chat-panel');
-      await userEvent.type(
+      await user.type(
         within(chat).getByTestId('chat-input'),
         'buatkan laporan dari template yang di berikan dan dokumentasi/source bisa dari sumber zip yang saya berikan',
       );
-      await userEvent.click(within(chat).getByTestId('chat-send'));
+      await user.click(within(chat).getByTestId('chat-send'));
 
       // It understood the request as drafting, not as an instruction to save.
       const steps = await within(chat).findByTestId('chat-steps');

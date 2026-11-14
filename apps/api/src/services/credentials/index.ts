@@ -36,7 +36,8 @@ const requestSettingsSchema = z
     maxTokens: z.number().int().min(64).max(200000).optional(),
     topP: z.number().min(0).max(1).optional(),
     apiVersion: z.string().max(40).optional(),
-    extraHeaders: z.record(z.string().max(200)).optional(),
+    // Zod 4 requires an explicit key schema; see the note in @formaai/shared.
+    extraHeaders: z.record(z.string(), z.string().max(200)).optional(),
   })
   .strict();
 

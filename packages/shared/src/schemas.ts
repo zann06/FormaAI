@@ -90,7 +90,9 @@ export const providerCredentialCreateSchema = z.object({
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(64).max(200000).optional(),
       topP: z.number().min(0).max(1).optional(),
-      extraHeaders: z.record(z.string().max(200)).optional(),
+      // Zod 4 requires an explicit key schema; a record of header name → value
+      // is a string-to-string map, so both sides are spelled out.
+      extraHeaders: z.record(z.string(), z.string().max(200)).optional(),
       apiVersion: z.string().max(40).optional(),
     })
     .partial()

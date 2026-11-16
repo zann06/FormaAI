@@ -9,7 +9,7 @@ that keeps your template's exact structure and formatting — exported as DOCX o
 
 [![CI](https://github.com/zann06/FormaAI/actions/workflows/ci.yml/badge.svg)](https://github.com/zann06/FormaAI/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE.txt)
-[![Tests](https://img.shields.io/badge/tests-447%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-455%20passing-brightgreen.svg)](#testing)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](#)
 
 [Quick start](#quick-start-docker) · [How it works](#how-it-works) · [Trust model](#trust-model-one-instance-per-person) · [Architecture](#architecture) · [Testing](#testing) · [Contributing](#contributing)
@@ -266,7 +266,7 @@ apps/web/src/pages/          one file per screen
 ```bash
 npm run typecheck
 npm run check:tenancy
-npm test              # 447 tests across 5 workspaces
+npm test              # 455 tests across 5 workspaces
 npm run build
 ```
 
@@ -274,7 +274,7 @@ npm run build
 | --- | --- | --- |
 | `@formaai/api` | 283 (+3 skipped) | auth, tenancy isolation, export rules, cover dates, gap resolution, jobs |
 | `@formaai/web` | 103 | chat action planning, workspace flows, providers, auth, dashboard, about, polling isolation |
-| `@formaai/docx-engine` | 34 | template analysis, byte-preserving assembly |
+| `@formaai/docx-engine` | 42 | template analysis, byte-preserving assembly, section/placeholder binding |
 | `@formaai/ai-providers` | 20 | adapters, retries, structured-output repair |
 | `@formaai/shared` | 7 | schema and constant contracts |
 

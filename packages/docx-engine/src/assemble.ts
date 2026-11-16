@@ -215,23 +215,116 @@ function replaceInAllParagraphs(nodes: XmlNode[], token: string, value: string):
 }
 
 /**
- * Locates the paragraph that held `token` so a figure can follow it.
+ * Replaces `token` inside one section's own stretch of the body.
  *
- * The replacement keeps the paragraph and swaps its text, so the enclosing <w:p>
- * is found by walking up from the text that is still there. Falls back to the
- * first body paragraph rather than dropping the figure entirely.
+ * Two properties matter and neither held before:
+ *
+ * 1. **Scope.** A token that appears twice in the template (a copy/paste slip by
+ *    the author) used to be filled twice, printing the generated chapter a second
+ *    time in place of the stray token. Only the first occurrence is filled; any
+ *    further ones are left visible and reported as unresolved, so the author can
+ *    see the leftover instead of receiving a duplicated chapter.
+ * 2. **No table cells.** Table-of-contents entries are stored as tables in most
+ *    campus templates, so sweeping every descendant also rewrote a `{{token}}`
+ *    inside the ToC. Body text only.
+ *
+ * `nodes` has to be the section's own slice of `w:body`, never the whole body.
+ */
+function replaceInSectionParagraphs(nodes: XmlNode[], token: string, value: string): number {
+  for (const node of nodes) {
+    if (node.tag !== 'w:p') continue;
+    const count = replaceInParagraph(node, token, value);
+    if (count > 0) return count;
+  }
+  return 0;
+}
+
+/**
+ * Body paragraphs that belong to one section: from just after its heading up to the
+ * next heading in the template.
+ *
+ * The bounds come from the analysis's `paragraphIndex` values, not from matching
+ * heading text, because two chapters may legitimately share a title and a text match
+ * sent every body to whichever came first.
+ */
+function sectionParagraphs(body: XmlNode, startIndex: number, endIndex: number): XmlNode[] {
+  const nodes: XmlNode[] = [];
+  for (let index = startIndex + 1; index < endIndex && index < body.children.length; index += 1) {
+    const node = body.children[index]!;
+    if (node.tag === 'w:p') nodes.push(node);
+  }
+  return nodes;
+}
+
+/**
+ * Locates the paragraph that held `token`, so a figure can follow it.
+ *
+ * Only an exact token hit counts. The old version fell back to the document's first
+ * paragraph, which silently anchored the figure to the cover page: by the time the
+ * figures were written the token had already been replaced, so the fallback was
+ * taken *every* time and the figure never landed in its chapter. Returning null
+ * lets the caller place it after the heading instead.
  */
 function findPlaceholderParagraph(body: XmlNode, token: string): XmlNode | null {
   const paragraphs = body.children.filter((c) => c.tag === 'w:p');
-  return paragraphs.find((p) => paragraphText(p).includes(token)) ?? paragraphs[0] ?? null;
+  return paragraphs.find((p) => paragraphText(p).includes(token)) ?? null;
 }
 
+/**
+ * The body-level index of the next detected heading after `heading`.
+ *
+ * A placeholder belongs to the chapter it sits in, so the replacement must stop at
+ * the following heading. The stopping rule is the template's own heading paragraphs
+ * — the set of heading texts the analysis found — re-scanned against the *current*
+ * body, because paragraphs inserted for earlier sections have already shifted the
+ * original indices.
+ */
+function nextHeadingIndex(
+  body: XmlNode,
+  heading: XmlNode,
+  structure: { headings: Array<{ text: string }> },
+): number {
+  const start = body.children.indexOf(heading);
+  if (start < 0) return body.children.length;
+  const titles = new Set(structure.headings.map((h) => h.text.trim()).filter(Boolean));
+  for (let index = start + 1; index < body.children.length; index += 1) {
+    const node = body.children[index]!;
+    if (node.tag !== 'w:p') continue;
+    if (titles.has(paragraphText(node).trim())) return index;
+  }
+  return body.children.length;
+}
+
+/**
+ * Locates a section's heading paragraph.
+ *
+ * `section.paragraphIndex` comes from the template analysis and indexes
+ * `w:body`'s children — which include tables. This function used to look it up in a
+ * paragraphs-only array, so the moment a template had a table anywhere above a
+ * chapter every later heading resolved to the wrong paragraph (or to none).
+ */
 function findHeadingParagraph(body: XmlNode, section: AssemblySection): XmlNode | null {
-  const paragraphs = body.children.filter((c) => c.tag === 'w:p');
-  const candidate = paragraphs[section.paragraphIndex];
-  if (candidate && paragraphText(candidate).trim() === section.headingText.trim()) return candidate;
-  const normalized = section.headingText.trim().toLowerCase();
-  return paragraphs.find((p) => paragraphText(p).trim().toLowerCase() === normalized) ?? null;
+  const wanted = section.headingText.trim();
+  if (!wanted) return null;
+  const byIndex = body.children[section.paragraphIndex];
+  if (byIndex && byIndex.tag === 'w:p' && paragraphText(byIndex).trim() === wanted) return byIndex;
+
+  // The recorded index can also drift when an earlier section in this same pass has
+  // already inserted paragraphs. The title is then the next best handle — but it
+  // must be *this section's* title: matching any later paragraph with the same text
+  // put every chapter that shared a name into the first one. Search outwards from
+  // the recorded index, then accept a unique match; an ambiguous title has no safe
+  // target, so refuse and let the caller warn instead of guessing.
+  const isMatch = (node: XmlNode | undefined) => node !== undefined && node.tag === 'w:p' && paragraphText(node).trim() === wanted;
+  const span = body.children.length;
+  for (let offset = 1; offset <= Math.min(16, span); offset += 1) {
+    const after = body.children[section.paragraphIndex + offset];
+    if (isMatch(after)) return after!;
+    const before = body.children[section.paragraphIndex - offset];
+    if (isMatch(before)) return before!;
+  }
+  const matches = body.children.filter((node) => isMatch(node));
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 /**
@@ -501,6 +594,13 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
   let imagesInserted = 0;
   /** Dashed template slots that received their picture. */
   let tablesFilled = 0;
+  /**
+   * Sections whose content could not be placed where the template wanted it.
+   *
+   * These are fidelity failures, not notes: the chapter keeps its template text or
+   * goes missing entirely, so the report must not claim it passed.
+   */
+  const unresolvedSections: string[] = [];
 
   // Figures are written as real media parts. Word needs three things to stay
   // consistent: the bytes under `word/media/`, a relationship in
@@ -531,12 +631,32 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
     const placeholder = section.placeholder?.trim();
     if (section.insertionStrategy === 'placeholder' && placeholder) {
       const token = placeholder.startsWith('{{') ? placeholder : `{{${placeholder}}}`;
-      const count = replaceInAllParagraphs(root.children, token, content.replace(/\n{2,}/g, '\n'));
+      /*
+       * The replacement is scoped to the section's OWN body. Sweeping the whole
+       * document filled the token wherever it appeared — printing the chapter twice
+       * when the author had duplicated the token, and rewriting a `{{token}}` sitting
+       * in the table of contents.
+       *
+       * When no heading can be located the whole body is searched instead, but
+       * `replaceInSectionParagraphs` still stops at the FIRST paragraph carrying the
+       * token, so a duplicated token can never print the chapter twice.
+       */
+      const heading = findHeadingParagraph(body, section) ?? findPlaceholderParagraph(body, token);
+      const scope = heading
+        ? sectionParagraphs(body, body.children.indexOf(heading), nextHeadingIndex(body, heading, originalStructure))
+        : [];
+      const targets = scope.length > 0 ? scope : body.children;
+      const count = replaceInSectionParagraphs(targets, token, content.replace(/\n{2,}/g, '\n'));
       replacedPlaceholders += count;
+      if (count === 0) {
+        // The token was not found where it belongs, so this chapter will keep its
+        // template text. That is a fidelity failure, not a cosmetic warning.
+        unresolvedSections.push(`${section.headingText}: placeholder {{${placeholder}}} was not found in this section`);
+      }
       // A figure belongs to the section whatever strategy filled its text, so it
       // still has to be written; only the prose was handled above.
       if (count > 0 && (section.figures?.length ?? 0) > 0) {
-        const placeholderPara = findPlaceholderParagraph(body, token);
+        const placeholderPara = heading ?? findPlaceholderParagraph(body, token);
         if (placeholderPara) {
           let anchor = placeholderPara;
           for (const figure of section.figures ?? []) {
@@ -551,7 +671,12 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
       continue;
     }
     const headingPara = findHeadingParagraph(body, section);
-    if (!headingPara) continue;
+    if (!headingPara) {
+      // Silently `continue`-ing here deleted the chapter AND its generated table and
+      // figures while the report still said `passed: true`. Say so instead.
+      unresolvedSections.push(`${section.headingText}: heading not found in the template, its content was not written`);
+      continue;
+    }
     const paragraphs = buildContentParagraphs(content, headingPara);
     if (paragraphs.length > 0) {
       insertAfter(body, headingPara, paragraphs);
@@ -644,9 +769,28 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
   if (unresolved.length) {
     warnings.push(`${unresolved.length} placeholder(s) were not filled: ${unresolved.slice(0, 8).join(', ')}`);
   }
+  // A section that could not be placed is the difference between "the report follows
+  // the template" and "the report is missing a chapter". It used to be swallowed.
+  for (const problem of unresolvedSections) warnings.push(problem);
   if (originalStructure.contentControlCount > 0) {
     warnings.push('Content controls (w:sdt) were preserved but not restructured.');
   }
+
+  /**
+   * Header/footer preservation, checked by content and not by filename.
+   *
+   * This used to be `partCount === partCount` — a filename census that is true by
+   * construction, because the export copies those parts through untouched. A census
+   * cannot detect a header whose text was lost, so it compared nothing. Compare the
+   * actual text now: whatever the template's headers said must still be said.
+   */
+  const sourceParts = readDocxPackage(templateBytes).files;
+  const headerPartsIntact = headerTexts.every((text) =>
+    headerParts.some((name) => partText(xmlToString(reopened.files[name]!)).includes(text)),
+  ) && headerParts.length === Object.keys(sourceParts).filter((n) => /^word\/header\d+\.xml$/.test(n)).length;
+  const footerPartsIntact = footerTexts.every((text) =>
+    footerParts.some((name) => partText(xmlToString(reopened.files[name]!)).includes(text)),
+  ) && footerParts.length === Object.keys(sourceParts).filter((n) => /^word\/footer\d+\.xml$/.test(n)).length;
 
   const fidelity: FidelityReport = {
     templateHeadings: originalStructure.headings.length,
@@ -656,12 +800,21 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
     templateImages: originalStructure.imagesCount,
     outputImages: outputStructure.imagesCount,
     templateStylesPreserved: stylesPreserved,
-    headersPreserved: headerParts.length === Object.keys(readDocxPackage(templateBytes).files).filter((n) => /^word\/header\d+\.xml$/.test(n)).length,
-    footersPreserved: footerParts.length === Object.keys(readDocxPackage(templateBytes).files).filter((n) => /^word\/footer\d+\.xml$/.test(n)).length,
+    headersPreserved: headerPartsIntact,
+    footersPreserved: footerPartsIntact,
     insertedParagraphs,
     replacedPlaceholders,
     warnings,
-    passed: headingsOk && tablesOk && imagesOk && stylesPreserved,
+    // A chapter that could not be placed, or a header/footer whose text went missing,
+    // means the output does not follow the template — regardless of the counts.
+    passed:
+      headingsOk &&
+      tablesOk &&
+      imagesOk &&
+      stylesPreserved &&
+      headerPartsIntact &&
+      footerPartsIntact &&
+      unresolvedSections.length === 0,
   };
 
   void mediaParts;

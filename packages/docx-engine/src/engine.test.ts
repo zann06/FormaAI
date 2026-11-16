@@ -757,4 +757,331 @@ describe('heading formatting survives content insertion', () => {
   });
 });
 
+/**
+ * Regressions found by auditing the assembler against the MVP promise: "the
+ * output adapts to the template the user uploaded". Each test below reproduced a
+ * way the generated report could silently diverge from the template — text in the
+ * wrong chapter, text printed twice, or a whole chapter with its table and figures
+ * vanishing — while the fidelity report still said `passed: true`.
+ */
+describe('assembly must not silently corrupt the template', () => {
+  /** Every body paragraph text, in document order. */
+  function bodyTexts(buffer: Uint8Array): string[] {
+    const [root] = parseXml(xmlToString(readDocxPackage(buffer).files['word/document.xml']!));
+    return findChild(root!, 'w:body')!.children
+      .filter((c) => c.tag === 'w:p')
+      .map(paragraphText);
+  }
+
+  /**
+   * A token that appears twice is a template authoring slip, but it must not print
+   * the generated chapter twice: only one copy of the prose may survive, and the
+   * other token must be reported instead of being filled.
+   */
+  it('fills a duplicated placeholder only once and still reports the section as filled', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: '{{bab1}}' },
+        { text: 'BAB II PEMBAHASAN', styleId: 'Heading1' },
+        { text: 'Isi pembahasan.' },
+        // The same token pasted again, e.g. by a copy/paste inside the template.
+        { text: 'Catatan: {{bab1}}' },
+      ],
+    });
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: 'BAB I PENDAHULUAN',
+          paragraphIndex: 0,
+          insertionStrategy: 'placeholder',
+          placeholder: 'bab1',
+          content: 'Paragraf pendahuluan yang dihasilkan.',
+        },
+      ],
+    });
+
+    const texts = bodyTexts(result.buffer);
+    const occurrences = texts.filter((t) => t === 'Paragraf pendahuluan yang dihasilkan.').length;
+    expect(occurrences).toBe(1);
+    // The second token is left alone rather than duplicated into the prose.
+    expect(texts.join('\n')).toContain('Catatan: {{bab1}}');
+    expect(result.fidelity.warnings.join(' ')).toContain('bab1');
+  });
+
+  /**
+   * A token that sits directly under the *next* heading belongs to that next
+   * section. Analysis used to slice the body by paragraph index only, so a token
+   * before heading B was attributed to A — the generated text landed in the
+   * previous chapter and B's token survived untouched.
+   */
+  it('binds a placeholder to the heading above it, not to the previous section', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: '{{isi_bab1}}' },
+        { text: 'BAB II PEMBAHASAN', styleId: 'Heading1' },
+        { text: '{{isi_bab2}}' },
+        { text: 'BAB III PENUTUP', styleId: 'Heading1' },
+      ],
+    });
+    const pkg = readDocxPackage(template);
+    const structure = analyzeDocumentXml(
+      xmlToString(pkg.files['word/document.xml']!),
+      xmlToString(pkg.files['word/styles.xml']!),
+      null,
+    );
+    const bab2 = structure.headings.find((h) => h.text === 'BAB II PEMBAHASAN')!;
+    const bab1 = structure.headings.find((h) => h.text === 'BAB I PENDAHULUAN')!;
+    // The token physically under BAB II belongs to BAB II, and BAB I must not be
+    // told it has a reserved placeholder — that is what made the assembler write the
+    // generated text into the previous chapter and leave BAB II's token in place.
+    expect(bab2.placeholders).toContain('isi_bab2');
+    expect(bab1.hasExplicitPlaceholder).toBe(true); // it owns {{isi_bab1}}
+    expect(bab2.hasExplicitPlaceholder).toBe(true);
+    expect(bab2.suggestedStrategy).toBe('placeholder');
+    expect(bab2.bodyText).toContain('{{isi_bab2}}');
+    // BAB I's own body must not contain BAB II's token.
+    expect(bab1.bodyText).not.toContain('{{isi_bab2}}');
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: bab2.id,
+          headingText: bab2.text,
+          paragraphIndex: bab2.paragraphIndex,
+          insertionStrategy: 'placeholder',
+          placeholder: 'isi_bab2',
+          content: 'Isi bab dua.',
+        },
+      ],
+    });
+
+    const texts = bodyTexts(result.buffer);
+    const insertedAt = texts.indexOf('Isi bab dua.');
+    const bab2At = texts.indexOf('BAB II PEMBAHASAN');
+    const bab3At = texts.indexOf('BAB III PENUTUP');
+    expect(insertedAt).toBeGreaterThan(bab2At);
+    expect(insertedAt).toBeLessThan(bab3At);
+  });
+
+  /**
+   * The analysis bug had a second half that survives any analysis fix: the UI may
+   * already hold a stale `placeholder` for a section (the user's template was edited
+   * after analysis). If BAB I is told to fill `isi_bab2`, the token physically sits
+   * in BAB II, so the generated text must NOT be written above BAB II — and the
+   * mismatch must be reported rather than silently pasted into the wrong chapter.
+   */
+  it('refuses to fill a token that lives outside the section it was assigned to', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: '{{isi_bab1}}' },
+        { text: 'BAB II PEMBAHASAN', styleId: 'Heading1' },
+        { text: '{{isi_bab2}}' },
+      ],
+    });
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: 'BAB I PENDAHULUAN',
+          paragraphIndex: 0,
+          insertionStrategy: 'placeholder',
+          placeholder: 'isi_bab2', // stale assignment: this token is in BAB II
+          content: 'Isi yang seharusnya milik BAB I.',
+        },
+      ],
+    });
+
+    const texts = bodyTexts(result.buffer);
+    const insertedAt = texts.indexOf('Isi yang seharusnya milik BAB I.');
+    // The prose must not be written under BAB I, and BAB II's token must survive.
+    expect(insertedAt).toBe(-1);
+    expect(texts.join('\n')).toContain('{{isi_bab2}}');
+    expect(result.fidelity.passed).toBe(false);
+    expect(result.fidelity.warnings.join(' ')).toContain('isi_bab2');
+  });
+
+  /**
+   * A figure attached to a `placeholder` section belongs in that chapter, not on the
+   * cover. The anchor is the section's heading, and it has to stay inside the
+   * chapter even when the section arrives with a stale `paragraphIndex`.
+   */
+  it('anchors a figure to its own chapter, not to the first paragraph of the document', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'LAPORAN KERJA PRAKTIK', styleId: 'Title' },
+        { text: 'Nama: Ada' },
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1', pageBreakBefore: true },
+        { text: '{{isi}}' },
+        { text: 'BAB II PENUTUP', styleId: 'Heading1' },
+      ],
+    });
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: 'BAB I PENDAHULUAN',
+          paragraphIndex: 2,
+          insertionStrategy: 'placeholder',
+          placeholder: 'isi',
+          content: 'Isi bab satu dengan gambar.',
+          figures: [{ bytes: tinyPng(), extension: 'png', caption: 'Sumber: 1.png' }],
+        },
+      ],
+    });
+
+    expect(result.insertedImages).toBe(1);
+    const [root] = parseXml(xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!));
+    const body = findChild(root!, 'w:body')!;
+    const drawingAt = body.children.findIndex((node) => findAll(node, 'w:drawing').length > 0);
+    const titleAt = body.children.findIndex((node) => node.tag === 'w:p' && paragraphText(node) === 'LAPORAN KERJA PRAKTIK');
+    const headingAt = body.children.findIndex((node) => node.tag === 'w:p' && paragraphText(node) === 'BAB I PENDAHULUAN');
+    // After the chapter heading, and nowhere near the cover.
+    expect(drawingAt).toBeGreaterThan(headingAt);
+    expect(drawingAt).toBeGreaterThan(titleAt);
+  });
+
+  /**
+   * A section whose heading text does not exist in the template must never be
+   * placed by approximation. The user asked for "BAB I PENDAHULUAN" and the template
+   * has it; if the section arrives carrying an edited title, writing its prose into
+   * whichever chapter happens to be nearby would be a silent corruption.
+   */
+  it('refuses to place a section whose heading text is not in the template', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: 'Isi asli.' },
+        { text: 'BAB II PENUTUP', styleId: 'Heading1' },
+      ],
+    });
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: 'BAB I PENDAHULUAN (revisi)',
+          paragraphIndex: 99,
+          insertionStrategy: 'after_heading',
+          content: 'Isi yang dihasilkan.',
+        },
+      ],
+    });
+
+    const texts = bodyTexts(result.buffer);
+    expect(texts).not.toContain('Isi yang dihasilkan.');
+    expect(result.fidelity.passed).toBe(false);
+    expect(result.fidelity.warnings.join(' ')).toContain('BAB I PENDAHULUAN (revisi)');
+  });
+
+  /**
+   * Two chapters can legitimately share a title ("PENDAHULUAN" in a proposal and in
+   * an appendix). Matching by text sent every body to the first one, so the chapter
+   * that received the generated prose depended on insertion order rather than on
+   * which chapter the user edited. The table in the middle also proves the lookup
+   * uses `w:body` indices: `paragraphIndex` counts tables, so a paragraphs-only
+   * lookup resolved to the wrong paragraph from that point on.
+   */
+  it('targets the intended chapter when two headings share the same text', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'PENDAHULUAN', styleId: 'Heading1' },
+        { text: 'Isi pendahuluan asli.' },
+        { table: { rows: [['No', 'Uraian'], ['1', 'Data awal']] } },
+        { text: 'LAMPIRAN', styleId: 'Heading1' },
+        { text: 'Isi lampiran asli.' },
+        { text: 'PENDAHULUAN', styleId: 'Heading1' },
+        { text: 'Pembuka lampiran.' },
+      ],
+    });
+    const pkg = readDocxPackage(template);
+    const structure = analyzeDocumentXml(
+      xmlToString(pkg.files['word/document.xml']!),
+      xmlToString(pkg.files['word/styles.xml']!),
+      null,
+    );
+    const duplicates = structure.headings.filter((h) => h.text === 'PENDAHULUAN');
+    expect(duplicates).toHaveLength(2);
+    const second = duplicates[1]!;
+
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: second.id,
+          headingText: second.text,
+          paragraphIndex: second.paragraphIndex,
+          insertionStrategy: 'after_heading',
+          content: 'Isi baru untuk pendahuluan kedua.',
+        },
+      ],
+    });
+
+    const texts = bodyTexts(result.buffer);
+    const insertedAt = texts.indexOf('Isi baru untuk pendahuluan kedua.');
+    const lastHeadingAt = texts.lastIndexOf('PENDAHULUAN');
+    // The generated prose sits under the SECOND occurrence, not the first.
+    expect(insertedAt).toBeGreaterThan(lastHeadingAt);
+    expect(texts.indexOf('Pendahuluan kedua.')).toBe(-1);
+    // The first chapter and the appendix keep their original bodies.
+    expect(texts).toContain('Isi pendahuluan asli.');
+    expect(texts).toContain('Pembuka lampiran.');
+  });
+
+  /**
+   * If the heading the caller asked for cannot be located, the old code skipped the
+   * section without a word: its prose, its generated table and its figures all
+   * disappeared while `fidelity.passed` stayed true. Failing loudly is the only
+   * safe behaviour — the user must know the chapter is missing.
+   */
+  it('reports a section whose heading cannot be located instead of dropping it silently', () => {
+    const result = assembleDocx(complexTemplate(), {
+      sections: [
+        {
+          sectionId: 'sec-x',
+          headingText: 'Chapter 9 Not In This Template',
+          paragraphIndex: 42,
+          insertionStrategy: 'after_heading',
+          content: 'This content has nowhere to go.',
+        },
+      ],
+    });
+
+    expect(result.fidelity.warnings.join(' ')).toContain('Chapter 9 Not In This Template');
+    expect(result.fidelity.passed).toBe(false);
+  });
+
+  /**
+   * `placeholder` strategy with an empty token used to fall through to the
+   * heading path and leave the token in place without saying why.
+   */
+  it('falls back to the heading when the placeholder strategy has no token', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: '{{isi}}' },
+        { text: 'BAB II PENUTUP', styleId: 'Heading1' },
+      ],
+    });
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          headingText: 'BAB I PENDAHULUAN',
+          paragraphIndex: 0,
+          insertionStrategy: 'placeholder',
+          placeholder: '   ',
+          content: 'Isi bab satu.',
+        },
+      ],
+    });
+    const texts = bodyTexts(result.buffer);
+    const insertedAt = texts.indexOf('Isi bab satu.');
+    expect(insertedAt).toBeGreaterThan(texts.indexOf('BAB I PENDAHULUAN'));
+    expect(insertedAt).toBeLessThan(texts.indexOf('BAB II PENUTUP'));
+  });
+});
+
 

@@ -116,8 +116,12 @@
   }
 
   .input {
+    /* A faint inset shadow makes the field read as carved into the surface, and the
+       offset it gives up on focus (replaced by the ring) is what makes focus feel
+       like the field lifting towards you. */
     @apply w-full rounded-lg border border-ink-200 bg-white px-3 py-2 text-sm text-ink-900
-      placeholder:text-ink-400 hover:border-ink-300 focus:border-brand-500 focus:ring-1 focus:ring-brand-500;
+      shadow-[inset_0_1px_2px_rgba(9,49,141,0.06)] transition-[border-color,box-shadow] duration-150 ease-brand
+      placeholder:text-ink-400 hover:border-ink-300 focus:border-brand-500 focus:shadow-none focus:ring-1 focus:ring-brand-500;
   }
   .label {
     @apply mb-1.5 block text-sm font-medium text-ink-700;
@@ -129,8 +133,18 @@
     @apply mt-1 text-xs font-medium text-red-600;
   }
 
+  /**
+   * The standard surface: a white panel lifted off the page.
+   *
+   * `shadow-card` alone gave a single soft blur, which on a white page reads as a
+   * faint grey smudge rather than as height. `shadow-panel` stacks a hairline
+   * contact edge, a mid shadow and a wide ambient pool, so the card looks like it is
+   * resting on the page. The `before:` pseudo-element adds a one-pixel highlight
+   * along the top inside edge — the same trick physical UI kits use — which is what
+   * makes the surface catch the light instead of looking like flat paper.
+   */
   .card {
-    @apply rounded-xl border border-ink-200/80 bg-white shadow-card;
+    @apply relative rounded-xl border border-ink-200/80 bg-white shadow-panel;
   }
   .card-hover {
     /* 300ms felt like the card was thinking about it; 180ms with the house

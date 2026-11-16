@@ -420,7 +420,33 @@ export function analyzeDocumentXml(
   const formatHeadingCount = detected.filter((heading) => heading.source === 'format').length;
 
   const placeholders = extractPlaceholders(documentXml.replace(/<[^>]+>/g, ''));
-  const placeholderKeysLower = placeholders.map((p) => p.toLowerCase());
+
+  /**
+   * Assign every `{{token}}` to the heading it sits *under*.
+   *
+   * Slicing each section by "next detected heading" is not enough: a token on the
+   * line right below heading A also belongs to the slice of A's last sub-heading,
+   * so it was attributed to the deepest preceding heading — and when the following
+   * heading was the next chapter, the chapter's own body was credited to the
+   * previous chapter. The generated text then landed one chapter too early and the
+   * real token survived. Walking the body once and remembering the nearest heading
+   * at or above each token keeps ownership deterministic.
+   */
+  const tokenOwner = new Map<string, number>();
+  {
+    let current = -1;
+    const headingItemIndex = new Map<number, number>();
+    detected.forEach((heading, order) => headingItemIndex.set(heading.itemIndex, order));
+    items.forEach((item, itemIndex) => {
+      const owner = headingItemIndex.get(itemIndex);
+      if (owner !== undefined) current = owner;
+      if (item.kind !== 'paragraph' || current < 0) return;
+      for (const key of extractPlaceholders(paragraphText(item.node))) {
+        // A heading listed ahead of us never re-claims a token it does not own.
+        if (!tokenOwner.has(key)) tokenOwner.set(key, current);
+      }
+    });
+  }
 
   const headings: TemplateHeading[] = detected.map((heading, order) => {
     const next = detected[order + 1];
@@ -441,9 +467,19 @@ export function analyzeDocumentXml(
       `section${order + 1}`,
       heading.text.toLowerCase().trim(),
     ];
-    const hasExplicitPlaceholder = keyCandidates.some((candidate) =>
-      placeholderKeysLower.some((p) => p === candidate || p.includes(candidate)),
-    );
+    // Ownership is what decides whether this section can be filled in place. A token
+    // may only be claimed by the section it physically follows.
+    const ownedPlaceholders = sectionPlaceholders.filter((p) => tokenOwner.get(p) === order);
+    // The key candidates exist so a *human-readable* token (`{{pendahuluan}}`,
+    // `{{bab 2}}`) still counts as reserved for this section. Matching is done on
+    // the raw substring, never on lower-cased text, because the tokens are matched
+    // case-sensitively during assembly: `{{BAB 2}}` and `{{bab 2}}` are different
+    // tokens, so `bab 2` must not claim a section reserved by `{{BAB 2}}`.
+    const hasExplicitPlaceholder =
+      ownedPlaceholders.length > 0 ||
+      keyCandidates.some((candidate) =>
+        placeholders.some((p) => p === candidate || p.toLowerCase().includes(candidate.toLowerCase())),
+      );
     return {
       id: `sec-${order + 1}`,
       text: heading.text,
@@ -460,6 +496,9 @@ export function analyzeDocumentXml(
       tableCount,
       hasImages,
       pageBreakBefore: heading.pageBreakBefore,
+      // Only a token this section actually owns can be filled in place. A token that
+      // sits under a later heading must not switch this section to `placeholder`,
+      // or the generated text would overwrite it from the wrong chapter.
       suggestedStrategy: sectionPlaceholders.length > 0 ? 'placeholder' : 'after_heading',
     };
   });

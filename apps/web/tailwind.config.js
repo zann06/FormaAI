@@ -94,6 +94,15 @@ export default {
         band: '0 1px 2px rgba(6,31,86,0.10), 0 24px 60px -24px rgba(9,49,141,0.45), 0 8px 22px -12px rgba(9,49,141,0.28)',
         /** Glow behind the accent button, used where it sits on dark blue. */
         'accent-glow': '0 10px 30px -8px rgba(253,145,204,0.65), 0 2px 10px -2px rgba(253,145,204,0.45)',
+        /**
+         * A three-layer shadow for primary panels.
+         *
+         * One shadow reads as a grey outline; three at different offsets and blurs
+         * read as light falling on a real surface — a tight contact line, a mid
+         * shadow for the edge, and a wide ambient pool. This is the difference
+         * between "a border" and "something sitting above the page".
+         */
+        panel: '0 0 0 1px rgba(9,49,141,0.04), 0 1px 3px rgba(9,49,141,0.07), 0 14px 34px -16px rgba(9,49,141,0.22), 0 32px 64px -40px rgba(9,49,141,0.28)',
       },
       keyframes: {
         'fade-up': {

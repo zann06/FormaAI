@@ -263,7 +263,11 @@ export function PreviewPane({
         {preview && preview.pages.length > 0 && (
           <div className="mx-auto flex w-fit flex-col items-center gap-3">
             {preview.pages.map((page) => (
-              <figure key={page.page} className="shadow-md" data-testid={`preview-page-${page.page}`}>
+              <figure
+                key={page.page}
+                className="overflow-hidden rounded-sm shadow-panel ring-1 ring-ink-200/60 transition-shadow duration-200 ease-brand hover:shadow-band"
+                data-testid={`preview-page-${page.page}`}
+              >
                 <img
                   src={page.image}
                   alt={`Page ${page.page} of the exported report`}

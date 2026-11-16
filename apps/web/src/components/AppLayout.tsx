@@ -60,7 +60,13 @@ export function AppLayout() {
 
   return (
     <div className="flex min-h-full flex-col bg-ink-50">
-      <header className="sticky top-0 z-30 border-b border-ink-200/70 bg-white/80 backdrop-blur-xl">
+      {/*
+        The sticky header used to have only a hairline border, so once it stuck to
+        the top it merged into the page and read as part of the content. The shadow
+        below gives it real height above the scrolling page, and the gradient behind
+        the app keeps the top of the viewport from looking flat.
+      */}
+      <header className="sticky top-0 z-30 border-b border-ink-200/70 bg-white/80 shadow-[0_1px_2px_rgba(9,49,141,0.04),0_8px_24px_-16px_rgba(9,49,141,0.28)] backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-7xl items-center gap-6 px-4 sm:px-6">
           <Logo to="/dashboard" size={30} />
 

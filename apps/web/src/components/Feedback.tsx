@@ -15,6 +15,16 @@ export function PageHeader({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-ink-900">{title}</h1>
         {description && <p className="mt-1 max-w-2xl text-sm text-ink-600">{description}</p>}
+        {/*
+          A short brand-gradient rule under the title. It is decorative only, so it
+          is `aria-hidden`, and it fades to nothing on the right instead of running
+          the full width — a full-width rule reads as a table border, a short fading
+          one reads as a underline of emphasis.
+        */}
+        <span
+          aria-hidden
+          className="mt-3 block h-0.5 w-16 rounded-full bg-gradient-to-r from-brand-600 to-accent-300/0"
+        />
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>

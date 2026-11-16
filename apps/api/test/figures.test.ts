@@ -101,10 +101,23 @@ describe('source figures in the export', () => {
       })
       .returning({ id: documents.id });
 
+    /*
+     * Attach the figure to a real content section.
+     *
+     * This used to take `sections[sections.length - 1]` from an unordered SELECT.
+     * The order of an unordered SELECT is not guaranteed, so the chosen row was
+     * sometimes the title section — which has no `report_sections` row yet, making
+     * the UPDATE below match zero rows and the figure vanish. The test then failed
+     * on `expected +0 to be 1` with no hint that the row was simply never written.
+     * Order explicitly and join the report row so the update always has a target.
+     */
     const sections = await context.db
       .select({ id: templateSections.id, heading: templateSections.heading })
       .from(templateSections)
-      .where(eq(templateSections.projectId, projectId));
+      .innerJoin(reportSections, eq(reportSections.templateSectionId, templateSections.id))
+      .where(eq(templateSections.projectId, projectId))
+      .orderBy(templateSections.sortOrder);
+    expect(sections.length).toBeGreaterThan(0);
     const target = sections[sections.length - 1]!;
 
     await context.db

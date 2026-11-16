@@ -215,28 +215,24 @@ function replaceInAllParagraphs(nodes: XmlNode[], token: string, value: string):
 }
 
 /**
- * Replaces `token` inside one section's own stretch of the body.
+ * Replaces `token` inside one section's own stretch of the body, returning the
+ * paragraph that received the content so a figure can be anchored to it.
  *
- * Two properties matter and neither held before:
- *
- * 1. **Scope.** A token that appears twice in the template (a copy/paste slip by
- *    the author) used to be filled twice, printing the generated chapter a second
- *    time in place of the stray token. Only the first occurrence is filled; any
- *    further ones are left visible and reported as unresolved, so the author can
- *    see the leftover instead of receiving a duplicated chapter.
- * 2. **No table cells.** Table-of-contents entries are stored as tables in most
- *    campus templates, so sweeping every descendant also rewrote a `{{token}}`
- *    inside the ToC. Body text only.
- *
- * `nodes` has to be the section's own slice of `w:body`, never the whole body.
+ * Only the first paragraph carrying the token is touched: the token is usually a
+ * lone placeholder line, but if the author pasted it twice, filling both would print
+ * the generated chapter twice.
  */
-function replaceInSectionParagraphs(nodes: XmlNode[], token: string, value: string): number {
+function replaceInSectionParagraphs(
+  nodes: XmlNode[],
+  token: string,
+  value: string,
+): { count: number; anchor: XmlNode | null } {
   for (const node of nodes) {
     if (node.tag !== 'w:p') continue;
     const count = replaceInParagraph(node, token, value);
-    if (count > 0) return count;
+    if (count > 0) return { count, anchor: node };
   }
-  return 0;
+  return { count: 0, anchor: null };
 }
 
 /**
@@ -646,17 +642,22 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
         ? sectionParagraphs(body, body.children.indexOf(heading), nextHeadingIndex(body, heading, originalStructure))
         : [];
       const targets = scope.length > 0 ? scope : body.children;
-      const count = replaceInSectionParagraphs(targets, token, content.replace(/\n{2,}/g, '\n'));
+      const { count, anchor: filledParagraph } = replaceInSectionParagraphs(
+        targets,
+        token,
+        content.replace(/\n{2,}/g, '\n'),
+      );
       replacedPlaceholders += count;
       if (count === 0) {
         // The token was not found where it belongs, so this chapter will keep its
         // template text. That is a fidelity failure, not a cosmetic warning.
         unresolvedSections.push(`${section.headingText}: placeholder {{${placeholder}}} was not found in this section`);
       }
-      // A figure belongs to the section whatever strategy filled its text, so it
-      // still has to be written; only the prose was handled above.
+      // A figure belongs to the section whatever strategy filled its text. The anchor
+      // is the paragraph that received the content, falling back to the heading — not
+      // a fresh token lookup, which would only work while the token is still there.
       if (count > 0 && (section.figures?.length ?? 0) > 0) {
-        const placeholderPara = heading ?? findPlaceholderParagraph(body, token);
+        const placeholderPara = filledParagraph ?? heading;
         if (placeholderPara) {
           let anchor = placeholderPara;
           for (const figure of section.figures ?? []) {

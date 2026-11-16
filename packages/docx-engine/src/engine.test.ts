@@ -978,6 +978,52 @@ describe('assembly must not silently corrupt the template', () => {
   });
 
   /**
+   * A figure attached to a `placeholder` section must survive even when the section
+   * arrives with a title that no longer matches the template. The token is then the
+   * only handle on the chapter, and the picture has to be written next to the prose
+   * it belongs to rather than dropped.
+   *
+   * (An earlier version anchored figures through a lookup that fell back to the
+   * document's first paragraph. That fallback is gone: if the anchor cannot be
+   * established the figure is placed after the section heading, never on the cover.)
+   */
+  it('keeps the figure of a placeholder section whose heading text no longer matches', () => {
+    const template = buildFixtureDocx({
+      body: [
+        { text: 'LAPORAN KERJA PRAKTIK', styleId: 'Title' },
+        { text: 'BAB I PENDAHULUAN', styleId: 'Heading1' },
+        { text: '{{isi}}' },
+        { text: 'BAB II PENUTUP', styleId: 'Heading1' },
+      ],
+    });
+    const result = assembleDocx(template, {
+      sections: [
+        {
+          sectionId: 'sec-1',
+          // Deliberately not resolvable: the token, not the title, is the handle.
+          headingText: 'Judul yang tidak ada di template',
+          paragraphIndex: 99,
+          insertionStrategy: 'placeholder',
+          placeholder: 'isi',
+          content: 'Isi bab satu.',
+          figures: [{ bytes: tinyPng(), extension: 'png', caption: 'Sumber: 1.png' }],
+        },
+      ],
+    });
+
+    expect(result.insertedImages).toBe(1);
+    const xml = xmlToString(readDocxPackage(result.buffer).files['word/document.xml']!);
+    expect(xml).toContain('<w:drawing');
+    // ...and the picture sits with its own prose, not on the cover.
+    const [root] = parseXml(xml);
+    const body = findChild(root!, 'w:body')!;
+    const proseAt = body.children.findIndex((node) => node.tag === 'w:p' && paragraphText(node).includes('Isi bab satu.'));
+    const drawingAt = body.children.findIndex((node) => findAll(node, 'w:drawing').length > 0);
+    expect(proseAt).toBeGreaterThan(0);
+    expect(drawingAt).toBeGreaterThan(proseAt);
+  });
+
+  /**
    * Two chapters can legitimately share a title ("PENDAHULUAN" in a proposal and in
    * an appendix). Matching by text sent every body to the first one, so the chapter
    * that received the generated prose depended on insertion order rather than on

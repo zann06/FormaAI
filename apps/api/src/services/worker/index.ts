@@ -103,10 +103,13 @@ export class JobWorker {
     // `FOR UPDATE SKIP LOCKED` cannot lock rows when the same table is re-read
     // through a correlated subquery, and the claim silently matched nothing —
     // which looked exactly like "the dependency is not ready yet".
+    //
+    // `attempts` is intentionally left alone here: it counts failed runs and is
+    // incremented in the failure handler, so bumping it on claim would bill a user
+    // for a job the worker never got to finish.
     const result = await this.db.execute<{ id: string }>(sql`
       update processing_jobs j
       set status = 'running',
-          attempts = j.attempts,
           locked_at = now(),
           started_at = coalesce(j.started_at, now()),
           updated_at = now()
@@ -130,7 +133,8 @@ export class JobWorker {
     return row ? { id: row.id } : null;
   }
 
-  async recoverStaleJobs(staleAfterMs = 10 * 60 * 1000): Promise<void> {    const { JobService } = await import('../jobs/index.js');
+  async recoverStaleJobs(staleAfterMs = 10 * 60 * 1000): Promise<void> {
+    const { JobService } = await import('../jobs/index.js');
     const jobs = new JobService(this.db, this.services.config.JOB_MAX_ATTEMPTS);
     const result = await jobs.recoverStaleJobs(staleAfterMs);
     if (result.requeued || result.failed) {

@@ -142,7 +142,7 @@ describe('ProvidersPage', () => {
     await user.click(picker);
 
     // The catalogue comes from the server, and the still-configured model stays
-    // selectable even though this provider no longer lists it â€” otherwise saving
+    // selectable even though this provider no longer lists it — otherwise saving
     // the form would silently switch the user's model to the first entry.
     const options = await screen.findAllByRole('option');
     expect(options.map((option) => option.getAttribute('aria-selected'))).toEqual([
@@ -198,7 +198,7 @@ describe('ProvidersPage', () => {
     const picker = (await screen.findByLabelText('Model')) as HTMLButtonElement;
     await waitFor(() => expect(picker.getAttribute('role')).toBe('combobox'));
 
-    // Open, step down to the last option and confirm â€” the native-select keyboard
+    // Open, step down to the last option and confirm — the native-select keyboard
     // contract. Arrow presses are counted from the real list so the test does not
     // depend on how many models the mock happens to return.
     picker.focus();

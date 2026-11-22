@@ -52,9 +52,9 @@ export interface AssemblyFigure {
   /**
    * Which source image this came from.
    *
-   * Templates reserve dashed boxes with "[ TEMPELKAN SCREENSHOT: â€¦ ]" instructions,
+   * Templates reserve dashed boxes with "[ TEMPELKAN SCREENSHOT: … ]" instructions,
    * and the right picture for a box is decided by matching the box's wording against
-   * the image's OCR text â€” so the figure has to carry its source identity here.
+   * the image's OCR text — so the figure has to carry its source identity here.
    */
   documentId?: string;
   /** OCR text of the source image, used to pick the slot this figure belongs in. */
@@ -158,7 +158,7 @@ function runPropsOf(paragraph: XmlNode): XmlNode | null {
  * own heading from bold 14pt dark blue into plain body text. The visible damage was
  * a document whose headings looked like paragraphs, and the fidelity check then
  * failed with "Heading count changed from 44 to 8" because headings are detected
- * from exactly that formatting â€” which blocked the PDF export as well.
+ * from exactly that formatting — which blocked the PDF export as well.
  */
 function clonedRunPropsOf(paragraph: XmlNode): XmlNode | null {
   const props = runPropsOf(paragraph);
@@ -327,13 +327,13 @@ function findHeadingParagraph(body: XmlNode, section: AssemblySection): XmlNode 
  * Places figures into the template's reserved screenshot boxes.
  *
  * The box is a one-cell table with dashed borders; its text is the instruction
- * (`[ TEMPELKAN SCREENSHOT: â€¦ ]` plus a small resolution hint). Filling it means:
+ * (`[ TEMPELKAN SCREENSHOT: … ]` plus a small resolution hint). Filling it means:
  *   1. drop the instruction paragraphs from the cell,
  *   2. append the picture paragraph inside the same cell,
  *   3. size the picture to the cell width so it cannot overflow the frame.
  *
- * The caption paragraph ("Gambar 1. â€¦") sits OUTSIDE the table in these templates,
- * so it keeps its place automatically â€” which is why the caption and its picture were
+ * The caption paragraph ("Gambar 1. …") sits OUTSIDE the table in these templates,
+ * so it keeps its place automatically — which is why the caption and its picture were
  * on different pages before.
  *
  * Figures that match no box are returned so the caller can append them as before.
@@ -394,7 +394,7 @@ function fillScreenshotSlots(
         continue;
       }
       if (child.tag === 'w:p' && isScreenshotSlotText(collectNodeText(child))) continue;
-      // The small "Pastikan screenshot diambilâ€¦" hint is also part of the prompt.
+      // The small "Pastikan screenshot diambil…" hint is also part of the prompt.
       if (child.tag === 'w:p' && /pastikan\s+screenshot/i.test(collectNodeText(child))) continue;
       keptChildren.push(child);
     }
@@ -427,6 +427,35 @@ function cellWidthOf(cell: XmlNode): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+/**
+ * Removes Markdown syntax the generator is not supposed to emit.
+ *
+ * The prompt asks for plain prose, but models still return `**penting**`,
+ * `` `kode` ``, `[tautan](url)` or `# Judul`. In a .docx none of that is rendered —
+ * it is printed literally, so a reader sees asterisks in a submitted report. The
+ * markers are stripped to their text; a heading marker loses the `#` but keeps its
+ * words, because the template already decides where headings live.
+ */
+export function stripMarkdown(text: string): string {
+  return (
+    text
+      // [label](url) -> label (keep the label, drop the raw URL)
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      // **bold**, __bold__, *italic*, _italic_ -> text. Requires a paired marker
+      // so a lone asterisk used as a footnote marker survives.
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/(^|\s)_([^_\n]+)_(?=\s|$)/g, '$1$2')
+      // `code` -> code
+      .replace(/`([^`]+)`/g, '$1')
+      // Leading #, ##, ... heading markers
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      // Leading blockquote markers
+      .replace(/^\s{0,3}>\s?/gm, '')
+  );
+}
+
 function buildContentParagraphs(content: string, headingPara: XmlNode | null): XmlNode[] {
   const pProps = headingPara ? cloneNode(paragraphPropsOf(headingPara) ?? { tag: 'w:pPr', attrs: {}, children: [] }) : null;
   if (pProps) {
@@ -438,14 +467,14 @@ function buildContentParagraphs(content: string, headingPara: XmlNode | null): X
     }
   }
   // Body text must not inherit heading emphasis (bold, larger size, colour). This
-  // filters the run properties, so it must operate on a COPY â€” `runPropsOf` hands
+  // filters the run properties, so it must operate on a COPY — `runPropsOf` hands
   // back the heading's live `<w:rPr>` and editing that in place stripped the
   // heading's own formatting (see `clonedRunPropsOf`).
   const rProps = headingPara ? clonedRunPropsOf(headingPara) : null;
   if (rProps) {
     rProps.children = rProps.children.filter((c) => c.tag !== 'w:b' && c.tag !== 'w:bCs' && c.tag !== 'w:color' && c.tag !== 'w:sz' && c.tag !== 'w:szCs');
   }
-  const normalized = content.replace(/\r\n/g, '\n').trim();
+  const normalized = stripMarkdown(content).replace(/\r\n/g, '\n').trim();
   if (!normalized) return [];
   const blocks = normalized.split(/\n{2,}/);
   const paragraphs: XmlNode[] = [];
@@ -469,9 +498,9 @@ function buildContentParagraphs(content: string, headingPara: XmlNode | null): X
         flush();
         continue;
       }
-      if (/^([-*â€¢]|\d+[.)])\s+/.test(trimmed)) {
+      if (/^([-*•]|\d+[.)])\s+/.test(trimmed)) {
         flush();
-        current.push(trimmed.replace(/^[-*â€¢]\s+/, 'â€¢ '));
+        current.push(trimmed.replace(/^[-*•]\s+/, '• '));
       } else {
         current.push(trimmed);
       }
@@ -495,7 +524,7 @@ function createFigureWriter(pkg: DocxPackage): {
   const relsPath = 'word/_rels/document.xml.rels';
   // These must MUTATE as figures are added. Writing `pkg.files[relsPath]` from a
   // stale local string made each figure overwrite the previous relationship, so a
-  // 25-image report shipped one valid relationship and 24 dangling ones â€” Word
+  // 25-image report shipped one valid relationship and 24 dangling ones — Word
   // treats a drawing whose r:embed resolves to nothing as corrupt, and LibreOffice
   // silently drops it. The PDF then showed 2 of 25 pictures while the DOCX looked
   // fine on inspection.
@@ -541,7 +570,7 @@ function createFigureWriter(pkg: DocxPackage): {
       const relationship =
         `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${fileName}"/>`;
       // Append to the CURRENT rels text, not the text as it was before the previous
-      // figures added theirs â€” otherwise this write erases them.
+      // figures added theirs — otherwise this write erases them.
       relsXml = relsXml.includes('</Relationships>')
         ? relsXml.replace('</Relationships>', `${relationship}</Relationships>`)
         : relsXml;
@@ -683,9 +712,18 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
       insertAfter(body, headingPara, paragraphs);
       insertedParagraphs += paragraphs.length;
     }
-    // A table goes after the prose it introduces, as a real Word table.
-    if (section.table && section.table.columns.length > 0) {
-      const tableNodes = createTable(section.table);
+    // A table goes after the prose it introduces, as a real Word table. A caller that
+    // forgets `columns` would otherwise throw an opaque TypeError out of the engine;
+    // saying what is missing makes the failure fixable at the call site.
+    if (section.table) {
+      const table = section.table;
+      if (!Array.isArray(table.columns) || table.columns.length === 0) {
+        throw new Error(
+          `Section "${section.headingText}" supplied a table with no columns; ` +
+            'a Word table needs at least one column to be written.',
+        );
+      }
+      const tableNodes = createTable(table);
       const anchor = paragraphs.length > 0 ? paragraphs[paragraphs.length - 1]! : headingPara;
       insertAfter(body, anchor, tableNodes);
       insertedParagraphs += 1;
@@ -696,8 +734,8 @@ export function assembleDocx(templateBytes: Uint8Array, options: AssembleOptions
     //
     // But a template that RESERVES a slot for the picture must be honoured. Real
     // campus templates wrap a dashed-border table cell around
-    // "[ TEMPELKAN SCREENSHOT: Diagram Topologi â€¦ ]", and appending the figure after
-    // the prose left that box empty while the picture floated elsewhere â€” the defect
+    // "[ TEMPELKAN SCREENSHOT: Diagram Topologi … ]", and appending the figure after
+    // the prose left that box empty while the picture floated elsewhere — the defect
     // the user reported. Figures that match a slot go INSIDE it; only the leftovers
     // are appended as before.
     const sectionFigures = section.figures ?? [];

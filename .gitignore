@@ -55,6 +55,9 @@ Thumbs.db
 probe*.ts
 probe*.log
 
+# Throwaway Chrome profile used by scripts/capture-screenshots.mjs
+.chrome-profile/
+
 # Documentation kept locally but not published. README.md is the single
 # Markdown document in the repository; the rest stay on disk for the author.
 CODE_OF_CONDUCT.md

@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -14,7 +14,7 @@ import { installFetchMock } from '../test/fetchMock';
  * long sentences per test, and on a loaded CI runner those waits pushed a single
  * test past its 30 s budget. A test aborted mid-`type` never runs its teardown, so
  * its committed tree stayed mounted and the *next* test found two chat transcripts
- * (`Found multiple elements by: [data-testid="chat-steps"]`) â€” eleven cascading
+ * (`Found multiple elements by: [data-testid="chat-steps"]`) — eleven cascading
  * failures that never reproduced locally.
  *
  * Removing the artificial delay keeps the same behavioural coverage without the
@@ -204,7 +204,7 @@ describe('ProjectWorkspacePage', () => {
     expect(screen.getByLabelText('Chat')).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
 
-    // Sources and outline are not in the grid any more â€” they are opened on demand.
+    // Sources and outline are not in the grid any more — they are opened on demand.
     expect(screen.queryByText('template.docx')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open section Introduction' })).not.toBeInTheDocument();
 
@@ -327,6 +327,60 @@ describe('ProjectWorkspacePage', () => {
     // The server's message is shown, never swallowed, and the user can retry.
     expect(screen.getAllByText(/No AI provider is configured for this account\./).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  /**
+   * A failed job used to be re-announced on every page load.
+   *
+   * `handleJobs` looped over every failed job the API returned, and the
+   * "already reported" set was module state, so a reload emptied it and the whole
+   * back catalogue of failures queued up as fresh toasts. A stale
+   * "convert pdf failed: The source DOCX export is not ready" therefore appeared
+   * next to a workspace that had nothing wrong with it.
+   */
+  function failedJob(id: string, finishedAt: Date, message: string) {
+    return {
+      id,
+      kind: 'convert_pdf',
+      status: 'failed',
+      stage: 'done',
+      progress: 100,
+      errorCode: 'JOB_FAILED',
+      errorMessage: message,
+      createdAt: finishedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+    };
+  }
+
+  it('does not re-announce failures that finished long before this visit', async () => {
+    const longAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    installFetchMock(
+      baseRoutes({
+        [`GET /api/projects/${projectId}/jobs`]: () => ({
+          json: { jobs: [failedJob('job-old', longAgo, 'The source DOCX export is not ready')] },
+        }),
+      }),
+    );
+    renderWorkspace();
+
+    // Let the workspace finish loading and polling once.
+    expect(await screen.findByText(/sections written/i)).toBeInTheDocument();
+    // The old failure must not be replayed as a live error.
+    expect(screen.queryByText(/convert pdf failed/i)).not.toBeInTheDocument();
+  });
+
+  it('announces a failure that just happened', async () => {
+    installFetchMock(
+      baseRoutes({
+        [`GET /api/projects/${projectId}/jobs`]: () => ({
+          json: { jobs: [failedJob('job-new', new Date(), 'The source DOCX export is not ready')] },
+        }),
+      }),
+    );
+    renderWorkspace();
+
+    // A fresh failure is still reported, with the server's reason.
+    expect(await screen.findByText(/convert pdf failed/i)).toBeInTheDocument();
   });
 
   /**
@@ -483,7 +537,7 @@ describe('ProjectWorkspacePage', () => {
 
   /**
    * The Preview tab shows the real exported pages. It must render the page images,
-   * explain truncation, and â€” when the server has no renderer â€” say so without
+   * explain truncation, and — when the server has no renderer — say so without
    * implying the report itself is broken.
    */
   describe('preview tab', () => {
@@ -523,7 +577,7 @@ describe('ProjectWorkspacePage', () => {
     /**
      * The preview used to update only on Refresh, so it was routine to fix a
      * section and still be shown the old page. It now re-renders by itself after a
-     * short debounce â€” this pins that, including the part that matters most: an
+     * short debounce — this pins that, including the part that matters most: an
      * edit that keeps the same character count must still refresh.
      */
     it('re-renders automatically after an edit, even one that keeps the same length', async () => {
@@ -788,7 +842,7 @@ describe('ProjectWorkspacePage', () => {
 
       const steps = await within(chat).findByTestId('chat-steps');
       // A question is ANSWERED from the project's real state, so the trail carries the
-      // facts behind the answer rather than "understood as â€¦" for a command.
+      // facts behind the answer rather than "understood as …" for a command.
       // It reports the real state of this project: 1 section, 1 written.
       expect(steps).toHaveTextContent(/Template read: 1 section/i);
       expect(steps).toHaveTextContent(/1 of 1 sections have content/i);
@@ -1046,7 +1100,7 @@ describe('ProjectWorkspacePage', () => {
     /**
      * The reported bug, end to end: the user sent
      *   "buatkan laporan dari template ... dan dokumentasi/source bisa dari sumber zip ..."
-     * and nothing at all came back. The reply bubble must always resolve â€” a silent
+     * and nothing at all came back. The reply bubble must always resolve — a silent
      * chat is indistinguishable from a crash.
      */
     it('answers a report request that cannot run instead of staying silent', async () => {

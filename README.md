@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="FormaAI" width="72" height="72" />
+
 # FormaAI
 
 **Template-driven report generation that refuses to invent facts.**
@@ -9,12 +11,16 @@ that keeps your template's exact structure and formatting — exported as DOCX o
 
 [![CI](https://github.com/zann06/FormaAI/actions/workflows/ci.yml/badge.svg)](https://github.com/zann06/FormaAI/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE.txt)
-[![Tests](https://img.shields.io/badge/tests-456%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-477%20passing-brightgreen.svg)](#testing)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](#)
 
-[Quick start](#quick-start-docker) · [How it works](#how-it-works) · [Trust model](#trust-model-one-instance-per-person) · [Architecture](#architecture) · [Testing](#testing) · [Contributing](#contributing)
+[Quick start](#quick-start-docker) · [Screenshots](#screenshots) · [How it works](#how-it-works) · [Trust model](#trust-model-one-instance-per-person) · [Architecture](#architecture) · [Testing](#testing) · [Contributing](#contributing)
 
 </div>
+
+---
+
+<img src="docs/screenshots/landing-hero.png" alt="FormaAI landing page: the hero reads “Reports that keep your template's shape”, on a deep blue gradient that fades to white, with a pink Start writing button." width="100%" />
 
 ---
 
@@ -23,6 +29,67 @@ API key, no central server and no telemetry. The intended deployment is **one
 instance per person** — you keep your own database, your own encryption key and
 your own files. Multiple accounts within one instance are still fully isolated
 from each other.
+
+## Screenshots
+
+These are real captures of a running instance, not mockups.
+
+**The workspace** — ask for changes, and read the result beside the report. The
+banner states how many sections were written and how many still show the
+template's original text, so a partial draft is never mistaken for a finished one.
+
+<img src="docs/screenshots/workspace.png" alt="The project workspace: a Report assistant pane on the left with an “Attach files” and “Generate the report” button, and a live Preview pane on the right showing a banner that reads “38 of 44 sections have been written. The rest still show the template's original text.”" width="100%" />
+
+<br />
+
+**Every project pairs one Word template with the sources it may draw from.** The
+status of the template and of the evidence mapping is shown on each card.
+
+<img src="docs/screenshots/dashboard.png" alt="The Projects dashboard: a search box, a “Show archived” checkbox, and a project card marked “Needs review” showing Template: Ready and Mapping: Ready." width="100%" />
+
+<br />
+
+<table>
+<tr>
+<td width="50%">
+<strong>Your own provider key</strong><br />
+Keys are encrypted at rest, write-only over the API, and testable with one real
+request. There is no shared platform key.
+</td>
+<td width="50%">
+<strong>Honest about this instance</strong><br />
+The About page reports what the deployment can actually do — PDF export, OCR,
+registration — read live from the API.
+</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/providers.png" alt="The AI providers settings page listing one OpenRouter-compatible provider marked Default and Connection OK, with Test, Edit, Set as fallback and Delete actions." width="100%" /></td>
+<td><img src="docs/screenshots/about.png" alt="The About page showing version 0.1.0, AGPL-3.0-or-later, and a live capability list where PDF export, OCR for scanned sources, the offline development provider and open sign-up all read Available." width="100%" /></td>
+</tr>
+</table>
+
+<details>
+<summary><strong>More screenshots</strong> — landing page, sign-in, closing call to action</summary>
+
+<br />
+
+**The closing call to action** carries the same gradient-to-white fade and soft
+shadow as the hero.
+
+<img src="docs/screenshots/landing-cta.png" alt="A rounded deep-blue band on a white page, reading “Start from the template you already have”, with Start writing and Sign in buttons." width="100%" />
+
+<br />
+
+<table>
+<tr>
+<td width="50%"><strong>Sign in</strong><br /><img src="docs/screenshots/signin.png" alt="The sign-in card with Email and Password fields and a Sign in button." width="100%" /></td>
+<td width="50%"><strong>Landing page</strong><br /><img src="docs/screenshots/landing.png" alt="The landing page: hero on a blue-to-white gradient above the first workflow section." width="100%" /></td>
+</tr>
+</table>
+
+</details>
+
+---
 
 ## Why it exists
 
@@ -266,15 +333,15 @@ apps/web/src/pages/          one file per screen
 ```bash
 npm run typecheck
 npm run check:tenancy
-npm test              # 456 tests across 5 workspaces
+npm test              # 477 tests across 5 workspaces
 npm run build
 ```
 
 | Workspace | Tests | What it pins down |
 | --- | --- | --- |
-| `@formaai/api` | 283 (+3 skipped) | auth, tenancy isolation, export rules, cover dates, gap resolution, jobs |
-| `@formaai/web` | 103 | chat action planning, workspace flows, providers, auth, dashboard, about, polling isolation |
-| `@formaai/docx-engine` | 43 | template analysis, byte-preserving assembly, section/placeholder binding |
+| `@formaai/api` | 286 (+3 skipped) | auth, tenancy isolation, export rules, cover dates, gap resolution, jobs, export failure propagation |
+| `@formaai/web` | 105 | chat action planning, workspace flows, providers, auth, dashboard, about, failure notices, polling isolation |
+| `@formaai/docx-engine` | 59 | template analysis, byte-preserving assembly, section/placeholder binding, varied assignment-template shapes |
 | `@formaai/ai-providers` | 20 | adapters, retries, structured-output repair |
 | `@formaai/shared` | 7 | schema and constant contracts |
 

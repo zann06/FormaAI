@@ -131,6 +131,14 @@ export function ProjectWorkspacePage() {
   const [outlineOpen, setOutlineOpen] = useState(false);
 
   const lastBusyCount = useRef(0);
+  /**
+   * When this workspace was opened.
+   *
+   * Job failures older than this are history, not news: the jobs endpoint returns
+   * every past job, so without a cutoff each page load re-announced failures from
+   * days ago.
+   */
+  const mountedAt = useRef(Date.now());
   // Refs let the polling callback call the latest loaders without re-creating
   // the polling loop every time state changes.
   const loadAllRef = useRef<() => Promise<void>>(async () => undefined);
@@ -144,11 +152,21 @@ export function ProjectWorkspacePage() {
       // A failed evidence mapping used to fail silently: the only trace was the
       // word "failed" in Recent activity, so users could not tell why nothing
       // was mapped. Report each failed job once, with the server's reason.
+      //
+      // Only failures that finished after this view opened are announced. The jobs
+      // endpoint returns the whole history, and the "already reported" set lives in
+      // module scope, so a page load emptied it and the entire back catalogue of
+      // failures queued up as if it had just happened — a stale
+      // "convert pdf failed: The source DOCX export is not ready" toast appearing
+      // beside a workspace with nothing wrong with it. History stays visible in
+      // Recent activity; it is not an error to interrupt someone with.
       for (const job of next) {
         if (job.status !== 'failed') continue;
         const key = `${job.id}:${job.finishedAt ?? ''}`;
         if (reportedJobFailures.has(key)) continue;
         rememberReported(key);
+        const finishedAt = job.finishedAt ? Date.parse(job.finishedAt) : NaN;
+        if (Number.isFinite(finishedAt) && finishedAt < mountedAt.current) continue;
         const label = (job.kind ?? 'job').replace(/_/g, ' ');
         const reason =
           job.errorMessage?.trim() ||

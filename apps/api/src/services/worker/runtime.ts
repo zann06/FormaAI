@@ -113,7 +113,7 @@ function imageFormatFor(mimeType: string, originalName: string): OcrImageFormat 
 /** Runs one job to completion. Used by the worker loop and by tests. */
 export async function executeJob(services: AllServices, jobId: string): Promise<void> {
   const { db, logger } = services;
-  const { processingJobs, projects } = await import('../../db/schema.js');
+  const { processingJobs, projects, exportArtifacts } = await import('../../db/schema.js');
   const { and, eq } = await import('drizzle-orm');
 
   const [job] = await db.select().from(processingJobs).where(eq(processingJobs.id, jobId)).limit(1);
@@ -434,6 +434,22 @@ export async function executeJob(services: AllServices, jobId: string): Promise<
         } catch {
           // Never mask the original job failure.
         }
+      }
+    }
+    if ((job.kind === 'assemble_docx' || job.kind === 'convert_pdf') && !willRetry) {
+      // An export is a two-step job (assemble, then convert) that the user watches by
+      // polling the artifact. Nothing advanced the artifact when the job died, so the
+      // row stayed `pending` with no error forever: the UI spun on a status that could
+      // never change while the toast blamed whichever step happened to be on screen.
+      // Record the real outcome on the artifact so the list can say what went wrong.
+      const payload = job.payload as { exportId?: string };
+      if (payload.exportId) {
+        await db
+          .update(exportArtifacts)
+          .set({ status: 'failed', errorMessage: message.slice(0, 1000), updatedAt: new Date() })
+          .where(
+            and(eq(exportArtifacts.id, payload.exportId), eq(exportArtifacts.userId, job.userId)),
+          );
       }
     }
     logger.error('Job failed', { jobId, kind: job.kind, code, attempts });

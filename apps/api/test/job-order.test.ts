@@ -1,6 +1,6 @@
 ﻿import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestApp, signUpUser, type TestApp, type TestUser } from './helpers.js';
-import { processingJobs } from '../src/db/schema.js';
+import { exportArtifacts, processingJobs } from '../src/db/schema.js';
 import { sql } from 'drizzle-orm';
 
 /**
@@ -114,5 +114,89 @@ describe('job claim respects dependsOnJobId', () => {
     await context.drainQueueOnce();
     expect(await jobStatus(runnable.id)).not.toBe('queued');
     expect(await jobStatus(blocked.id)).toBe('queued');
+  });
+});
+
+/**
+ * A failed export job must fail its artifact too.
+ *
+ * The worker's catch block patched the project for `analyze_template`, the document
+ * for `extract_document` and the section for `generate_section` — but nothing for
+ * `assemble_docx` or `convert_pdf`. So when an export job died, the artifact row was
+ * left `pending` with `error_message` NULL and no worker left to advance it: the UI
+ * polled a status that could never change, and the user saw "convert pdf failed: The
+ * source DOCX export is not ready" in a toast while the export list still said
+ * "pending" forever.
+ */
+describe('a failed export job fails its artifact', () => {
+  async function insertArtifact(projectId: string, format: 'docx' | 'pdf'): Promise<string> {
+    const [row] = await context.db
+      .insert(exportArtifacts)
+      .values({ userId: user.id, projectId, format, status: 'pending', versionNumber: 1 })
+      .returning();
+    return row!.id;
+  }
+
+  async function artifactState(
+    exportId: string,
+  ): Promise<{ status: string; errorMessage: string | null }> {
+    const rows = await context.db.execute<{ status: string; error_message: string | null }>(
+      sql`select status, error_message from export_artifacts where id = ${exportId}`,
+    );
+    const row = rows.rows[0]!;
+    return { status: row.status, errorMessage: row.error_message };
+  }
+
+  it('marks a failed convert_pdf artifact failed and records why', async () => {
+    const projectId = await createProject();
+    const exportId = await insertArtifact(projectId, 'pdf');
+    // No such DOCX export exists, so the job throws a non-retryable 404 conflict.
+    await insertJob(projectId, 'convert_pdf', {
+      exportId,
+      docxExportId: '00000000-0000-0000-0000-000000000000',
+    });
+
+    await context.drainQueueOnce();
+
+    const state = await artifactState(exportId);
+    expect(state.status).toBe('failed');
+    // A bare "failed" with no reason is what made this look like a hang.
+    expect(state.errorMessage).toBeTruthy();
+  });
+
+  it('marks a failed assemble_docx artifact failed and records why', async () => {
+    const projectId = await createProject();
+    const exportId = await insertArtifact(projectId, 'docx');
+    // The project has no template uploaded, so assembly is rejected up front.
+    await insertJob(projectId, 'assemble_docx', { exportId });
+
+    await context.drainQueueOnce();
+
+    const state = await artifactState(exportId);
+    expect(state.status).toBe('failed');
+    expect(state.errorMessage).toMatch(/template/i);
+  });
+
+  it('fails the artifact once the job settles as failed', async () => {
+    const projectId = await createProject();
+    const exportId = await insertArtifact(projectId, 'pdf');
+    const [job] = await context.db
+      .insert(processingJobs)
+      .values({
+        userId: user.id,
+        projectId,
+        kind: 'convert_pdf',
+        status: 'queued',
+        payload: { exportId, docxExportId: '00000000-0000-0000-0000-000000000000' },
+        maxAttempts: 5,
+      })
+      .returning();
+    expect(job).toBeTruthy();
+
+    // Not claimed at all, so the job has not run: the artifact must stay pending
+    // rather than being failed early by a status the job never reached.
+    await context.drainQueueOnce();
+    expect(await jobStatus(job!.id)).not.toBe('queued');
+    expect((await artifactState(exportId)).status).toBe('failed');
   });
 });

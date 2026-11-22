@@ -12,7 +12,7 @@ import { installFetchMock } from '../test/fetchMock';
  *
  * The default `userEvent` instance waits between keystrokes. On a loaded CI
  * runner those waits can push a single test past its 30 s budget, and a test
- * aborted mid-`type` never runs its teardown â€” its tree stays mounted and the
+ * aborted mid-`type` never runs its teardown — its tree stays mounted and the
  * next test then sees two copies of the page. `delay: null` is user-event's
  * documented way to skip the artificial wait without changing behaviour.
  */

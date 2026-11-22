@@ -435,18 +435,24 @@ function cellWidthOf(cell: XmlNode): number | null {
  * it is printed literally, so a reader sees asterisks in a submitted report. The
  * markers are stripped to their text; a heading marker loses the `#` but keeps its
  * words, because the template already decides where headings live.
+ *
+ * Emphasis is only recognised when the markers hug their text (`*kata*`), never
+ * across spaces (`5 * 3`). A report is full of arithmetic, and a naive
+ * `\*([^*]+)\*` turned `5 * 3 = 15` into `5  3 = 15` — silently changing a result
+ * the user is about to submit.
  */
 export function stripMarkdown(text: string): string {
   return (
     text
       // [label](url) -> label (keep the label, drop the raw URL)
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-      // **bold**, __bold__, *italic*, _italic_ -> text. Requires a paired marker
-      // so a lone asterisk used as a footnote marker survives.
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/__([^_]+)__/g, '$1')
-      .replace(/\*([^*\n]+)\*/g, '$1')
-      .replace(/(^|\s)_([^_\n]+)_(?=\s|$)/g, '$1$2')
+      // **bold** / __bold__, then *italic* / _italic_. The inner group cannot start
+      // or end with whitespace, and for the single-character forms the closer must
+      // not be followed by a word character, so `2*3` and `a * b` are left alone.
+      .replace(/\*\*(\S(?:[^*]*?\S)?)\*\*/g, '$1')
+      .replace(/__(\S(?:[^_]*?\S)?)__/g, '$1')
+      .replace(/\*(\S(?:[^*\n]*?\S)?)\*(?!\w)/g, '$1')
+      .replace(/(^|[\s(])_(\S(?:[^_\n]*?\S)?)_(?!\w)/g, '$1$2')
       // `code` -> code
       .replace(/`([^`]+)`/g, '$1')
       // Leading #, ##, ... heading markers

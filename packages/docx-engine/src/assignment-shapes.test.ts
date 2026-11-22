@@ -503,4 +503,39 @@ describe('assembly keeps the template intact across assignment shapes', () => {
       }),
     ).toThrow(/no columns/i);
   });
+
+  /**
+   * Markdown stripping must not touch arithmetic.
+   *
+   * A report is full of maths, and a naive `*italic*` rule turned "5 * 3 = 15"
+   * into "5  3 = 15" — silently changing a computed result the user is about to
+   * submit. Emphasis only counts when the asterisk hugs its text.
+   */
+  it('strips Markdown emphasis without destroying multiplication', async () => {
+    const docx = buildFixtureDocx({
+      body: [{ text: 'BAB I PENDAHULUAN', styleId: 'Heading1' }, { text: 'Isi.' }],
+    });
+
+    const structure = await analyze(docx);
+    const section = structure.headings.find((heading) => heading.text === 'BAB I PENDAHULUAN')!;
+    const result = assembleDocx(docx, {
+      sections: [
+        {
+          sectionId: section.id,
+          headingText: section.text,
+          paragraphIndex: section.paragraphIndex,
+          insertionStrategy: 'after_heading',
+          content: 'Hasil 5 * 3 = 15, lalu **ditebalkan** dan *dimiringkan*.',
+        },
+      ],
+    });
+
+    const joined = (await paragraphTexts(result.buffer)).join('\n');
+    // The arithmetic survives intact.
+    expect(joined).toContain('5 * 3 = 15');
+    // The emphasis markers do not.
+    expect(joined).toContain('ditebalkan');
+    expect(joined).toContain('dimiringkan');
+    expect(joined).not.toContain('**');
+  });
 });
